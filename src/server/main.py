@@ -13,7 +13,7 @@ from slowapi.errors import RateLimitExceeded
 from slowapi import _rate_limit_exceeded_handler
 
 from .config import config
-from .api.v1 import router as v1_router
+from .api.v1 import router as v1_router, router_v2 as v2_router
 from .middleware.logging import setup_logging, LoggingMiddleware
 from .middleware.rate_limit import rate_limit_middleware
 from .middleware.error_handler import error_handler
@@ -99,6 +99,7 @@ if os.path.exists(dashboard_dist):
 
 # Include API routers
 app.include_router(v1_router)
+app.include_router(v2_router)
 
 # Add exception handlers
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
