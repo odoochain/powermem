@@ -19,6 +19,12 @@ from .user_memory import UserMemory
 # Import configuration loader
 from .config_loader import load_config_from_env, create_config, validate_config, auto_config
 
+# Import intelligence extensions
+from .intelligence.search_query_optimizer import SearchQueryOptimizer
+from .intelligence.experience_query_rewriter import ExperienceQueryRewriter
+from .intelligence.experience_manager import ExperienceManager
+from .intelligence.content_reviewer import ContentReviewer
+
 
 def create_memory(
     config: Any = None,
@@ -295,4 +301,8 @@ __all__ = [
     "create_memory",
     "from_config",
     "auto_config",
+    "SearchQueryOptimizer",
+    "ExperienceQueryRewriter",
+    "ExperienceManager",
+    "ContentReviewer",
 ]

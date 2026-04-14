@@ -526,6 +526,17 @@ def remove_code_blocks(content: str) -> str:
     return match.group(1).strip() if match else content.strip()
 
 
+def strip_think_tags(text: str) -> str:
+    """Strip <think>...</think> blocks from reasoning model output (DeepSeek, QwQ).
+
+    Only applies the regex when an opening tag is actually present,
+    so normal content is left untouched.
+    """
+    if "<think>" not in text.lower():
+        return text.strip()
+    return re.sub(r"<think>[\s\S]*?</think>", "", text, flags=re.IGNORECASE).strip()
+
+
 def get_image_description(image_obj: Any, llm: Any, vision_details: Any) -> str:
     """
     - image_obj can be a URL string, or a prebuilt multimodal message (list/dict).
