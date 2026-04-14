@@ -6,7 +6,7 @@ from typing import Any, Dict, Optional
 
 from powermem import auto_config
 
-from ..models.request import PowermemConfig
+from ..models.request_v2 import PowermemConfig
 
 
 def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
