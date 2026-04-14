@@ -16,7 +16,8 @@ logger = logging.getLogger(__name__)
 
 
 # Use  FACT_RETRIEVAL_PROMPT for compatibility
-FACT_RETRIEVAL_PROMPT = f"""You are a Personal Information Organizer. Extract relevant facts, memories, preferences, intentions, and needs from conversations into distinct, manageable facts.
+# NOTE: contains {{today}} placeholder — call .format(today=...) at runtime.
+FACT_RETRIEVAL_PROMPT = """You are a Personal Information Organizer. Extract relevant facts, memories, preferences, intentions, and needs from conversations into distinct, manageable facts.
 
 Information Types: Personal preferences, details (names, relationships, dates), plans, intentions, needs, requests, activities, health/wellness (including medical appointments, symptoms, treatments), professional, miscellaneous.
 
@@ -25,7 +26,23 @@ CRITICAL Rules:
 2. COMPLETE: Extract self-contained facts with who/what/when/where when available.
 3. SEPARATE: Extract distinct facts separately, especially when they have different time periods.
 4. INTENTIONS & NEEDS: ALWAYS extract user intentions, needs, and requests even without time information. Examples: "Want to book a doctor appointment", "Need to call someone", "Plan to visit a place".
-5. LANGUAGE: DO NOT translate. Preserve the original language of the source text for each extracted fact. If the input is Chinese, output facts in Chinese; if English, output in English; if mixed-language, keep each fact in the language it appears in.
+5. LANGUAGE: Your output language MUST match the user's input language. DO NOT translate. If the user writes in Chinese, ALL extracted facts MUST be in Chinese. If the user writes in English, output in English. If mixed-language, keep each fact in the same language as its source. NEVER output English facts from Chinese input.
+6. SENSITIVE CONTENT — DO NOT EXTRACT: Skip any information that falls into these categories. Return an empty list if all content is sensitive.
+   - Politics: political stances, government criticism, political events, election opinions, regime commentary
+   - Sexual/pornographic content of any kind
+   - Violence or gore: descriptions of physical harm, torture, or graphic injury
+   - Dangerous weapons: firearms details, explosives, instructions for making weapons or harmful devices
+   - Self-harm or suicide: ideation, methods, plans, or encouragement
+   - Illegal drugs or controlled substances: usage, acquisition, or production
+   - Hate speech: racial, ethnic, religious, gender, or other discriminatory content
+   - Terrorism or extremism: radicalization, extremist ideology, attack planning
+   - Gambling: betting activities, gambling strategies, or addiction-related discussions
+   - Cybercrime: hacking techniques, malware, cyberattacks, or unauthorized system access
+   - Fraud or criminal activity: scams, theft, money laundering, or other illegal schemes
+   - Sensitive personal identifiers: ID/passport numbers, bank account numbers, credit card numbers, passwords, or private keys
+   - Child exploitation or any content harmful to minors
+   - Religious extremism or cult indoctrination
+   - Misinformation or deliberate disinformation campaigns
 
 Examples:
 Input: Hi.
@@ -47,12 +64,13 @@ Input: I want to book an appointment with a cardiologist.
 Output: {{"facts" : ["Want to book an appointment with a cardiologist"]}}
 
 Rules:
-- Today: {datetime.now().strftime("%Y-%m-%d")}
+- Today: {today}
 - Return JSON: {{"facts": ["fact1", "fact2"]}}
 - Extract from user/assistant messages only
 - Extract intentions, needs, and requests even without time information
 - If no relevant facts, return empty list
-- Output must preserve the input language (no translation)
+- Output language MUST match the input language — Chinese input → Chinese facts, English input → English facts. NEVER translate.
+- NEVER extract sensitive content (see Rule 6 above): return {{"facts": []}} for sensitive-only conversations
 
 Extract facts from the conversation below:"""
 
@@ -88,8 +106,9 @@ Update (enhance): Memory: [{{"id":"0","text":"Likes cricket"}}], Facts: ["Loves 
 Delete: Only clear contradictions (e.g., "Loves pizza" vs "Dislikes pizza"). Prefer UPDATE for time conflicts.
 
 Important: Use existing IDs only. Keep same ID when updating. Always preserve temporal information.
-LANGUAGE (CRITICAL): Do NOT translate memory text. Keep the same language as the incoming fact(s) and the original memory whenever possible.
-"""
+LANGUAGE (CRITICAL): Output language MUST match the incoming facts' language. Chinese facts → Chinese output, English facts → English output. NEVER translate between languages.
+SENSITIVE CONTENT (CRITICAL): Assign NONE to any fact containing political opinions, sexual content, violence, weapons, self-harm, suicide, illegal drugs, hate speech, terrorism, gambling, cybercrime, fraud, sensitive personal identifiers (ID/bank/card numbers, passwords), child exploitation, religious extremism, or misinformation. Never ADD or UPDATE memory with sensitive content.
+- Return ONLY valid JSON, no other text."""
 
 # Alias for compatibility
 MEMORY_UPDATE_PROMPT = DEFAULT_UPDATE_MEMORY_PROMPT

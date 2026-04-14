@@ -24,7 +24,11 @@ from ..integrations.embeddings.factory import EmbedderFactory
 from .telemetry import TelemetryManager
 from .audit import AuditLogger
 from ..intelligence.plugin import IntelligentMemoryPlugin, EbbinghausIntelligencePlugin
-from ..utils.utils import remove_code_blocks, convert_config_object_to_dict, parse_vision_messages
+from ..intelligence.search_query_optimizer import SearchQueryOptimizer
+from ..intelligence.experience_query_rewriter import ExperienceQueryRewriter
+from ..intelligence.experience_manager import ExperienceManager
+from ..intelligence.content_reviewer import ContentReviewer
+from ..utils.utils import remove_code_blocks, convert_config_object_to_dict, parse_vision_messages, strip_think_tags
 from ..prompts.intelligent_memory_prompts import (
     FACT_RETRIEVAL_PROMPT,
     FACT_EXTRACTION_PROMPT,
@@ -33,6 +37,18 @@ from ..prompts.intelligent_memory_prompts import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _merge_and_dedup_results(results: List[Dict[str, Any]], limit: int) -> List[Dict[str, Any]]:
+    """Deduplicate by memory id, keep the highest score, and return top-*limit*."""
+    seen: Dict[str, Dict[str, Any]] = {}
+    for r in results:
+        mid = str(r.get("id", id(r)))
+        prev = seen.get(mid)
+        if prev is None or r.get("score", 0.0) > prev.get("score", 0.0):
+            seen[mid] = r
+    merged = sorted(seen.values(), key=lambda x: x.get("score", 0.0), reverse=True)
+    return merged[:limit]
 
 
 def _auto_convert_config(config: Dict[str, Any]) -> Dict[str, Any]:
@@ -212,6 +228,12 @@ class AsyncMemory(MemoryBase):
         # Initialize sub stores
         self._init_sub_stores()
 
+        # Intelligence extensions
+        self.search_query_optimizer = SearchQueryOptimizer(self.llm)
+        self.experience_query_rewriter = ExperienceQueryRewriter(self.llm)
+        self.experience_manager = ExperienceManager(self.llm)
+        self.content_reviewer = ContentReviewer(llm=self.llm)
+
         logger.info(f"AsyncMemory initialized with storage: {self.storage_type}, LLM: {self.llm_provider}, agent: {self.agent_id or 'default'}")
         self.telemetry.capture_event("async_memory.init", {"storage_type": self.storage_type, "llm_provider": self.llm_provider, "agent_id": self.agent_id})
     
@@ -305,12 +327,12 @@ class AsyncMemory(MemoryBase):
             conversation = parse_messages_for_facts(messages)
             
             # Use custom prompt if provided, otherwise use default
+            today = datetime.now().strftime("%Y-%m-%d")
             if self.custom_fact_extraction_prompt:
                 system_prompt = self.custom_fact_extraction_prompt
-                user_prompt = f"Input:\n{conversation}"
             else:
-                system_prompt = FACT_RETRIEVAL_PROMPT
-                user_prompt = f"Input:\n{conversation}"
+                system_prompt = FACT_RETRIEVAL_PROMPT.format(today=today)
+            user_prompt = f"Input:\n{conversation}"
             
             # Call LLM to extract facts asynchronously
             try:
@@ -326,9 +348,9 @@ class AsyncMemory(MemoryBase):
                 logger.error(f"Error in fact extraction: {e}")
                 response = ""
             
-            # Parse response
+            # Parse response — strip reasoning tags then code fences
             try:
-                # Remove code blocks if present (LLM sometimes wraps JSON in code blocks)
+                response = strip_think_tags(response)
                 response = remove_code_blocks(response)
                 facts_data = json.loads(response)
                 facts = facts_data.get("facts", [])
@@ -393,8 +415,9 @@ class AsyncMemory(MemoryBase):
                 logger.error(f"Error in new memory actions response: {e}")
                 response = ""
             
-            # Parse response
+            # Parse response — strip reasoning tags then code fences
             try:
+                response = strip_think_tags(response)
                 response = remove_code_blocks(response)
                 actions_data = json.loads(response)
                 actions = actions_data.get("memory", [])
@@ -402,7 +425,7 @@ class AsyncMemory(MemoryBase):
             except Exception as e:
                 logger.error(f"Invalid JSON response: {e}")
                 return []
-                
+
         except Exception as e:
             logger.error(f"Error deciding memory actions: {e}")
             return []
@@ -1122,7 +1145,130 @@ class AsyncMemory(MemoryBase):
             logger.error(f"Failed to search memories: {e}")
             self.telemetry.capture_event("memory.search.error", {"error": str(e)})
             raise
-    
+
+    # -- Extended intelligence API (async) --
+
+    async def rewrite_search_query(
+        self,
+        query: str,
+        context: Optional[List[Dict[str, str]]] = None,
+    ) -> List[str]:
+        """Rewrite a conversational query into search-optimized sub-queries.
+
+        Resolves ambiguous references using *context* and splits compound
+        questions into independent search terms.
+
+        Returns:
+            List of optimised query strings (may be empty).
+        """
+        return await self.search_query_optimizer.arewrite(query, context)
+
+    async def search_with_rewrite(
+        self,
+        query: str,
+        context: Optional[List[Dict[str, str]]] = None,
+        user_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
+        run_id: Optional[str] = None,
+        filters: Optional[Dict[str, Any]] = None,
+        limit: int = 30,
+        threshold: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Rewrite the query into sub-queries, search each concurrently, and merge results.
+
+        Pipeline: Query -> Agent Rewrite -> concurrent search per sub-query -> merge + dedup -> top-K.
+
+        Falls back to a single-query search when rewriting yields no sub-queries.
+
+        Returns:
+            Same format as :meth:`search`, with an extra ``rewritten_queries`` key.
+        """
+        sub_queries = await self.rewrite_search_query(query, context)
+        if not sub_queries:
+            sub_queries = [query]
+
+        if len(sub_queries) == 1:
+            result = await self.search(
+                query=sub_queries[0],
+                user_id=user_id, agent_id=agent_id, run_id=run_id,
+                filters=filters, limit=limit, threshold=threshold,
+            )
+            result["rewritten_queries"] = sub_queries
+            return result
+
+        per_query_limit = max(limit, 30)
+
+        async def _run_search(q: str) -> List[Dict[str, Any]]:
+            try:
+                r = await self.search(
+                    query=q, user_id=user_id, agent_id=agent_id, run_id=run_id,
+                    filters=filters, limit=per_query_limit, threshold=threshold,
+                )
+                return r.get("results", [])
+            except Exception as exc:
+                logger.warning("Sub-query search failed for %r: %s", q, exc)
+                return []
+
+        tasks = [_run_search(q) for q in sub_queries]
+        results_lists = await asyncio.gather(*tasks)
+
+        all_results: List[Dict[str, Any]] = []
+        for rl in results_lists:
+            all_results.extend(rl)
+
+        merged = _merge_and_dedup_results(all_results, limit)
+
+        return {
+            "results": merged,
+            "rewritten_queries": sub_queries,
+        }
+
+    async def rewrite_experience_query(self, query: str) -> List[str]:
+        """Rewrite a query into short, title-style sub-queries for experience search.
+
+        Unlike :meth:`rewrite_search_query` which targets raw memory content,
+        this produces queries that match experience titles and descriptions.
+
+        Returns:
+            List of title-style query strings, or ``[]`` if not experience-related.
+        """
+        return await self.experience_query_rewriter.arewrite(query)
+
+    async def distill_experiences(
+        self,
+        messages: List[Dict[str, str]],
+        today: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Extract reusable task-solving experiences from a conversation.
+
+        Returns:
+            List of ``{"title": str, "description": str, "tags": list}``.
+        """
+        if today is None:
+            today = datetime.now().strftime("%Y-%m-%d")
+        return await self.experience_manager.adistill(messages, today)
+
+    async def merge_experiences(self, existing: str, new: str) -> Dict[str, str]:
+        """Merge two semantically similar experiences.
+
+        Returns:
+            ``{"title": str, "description": str}``.
+        """
+        return await self.experience_manager.amerge(existing, new)
+
+    async def review_content(
+        self,
+        title: str,
+        description: str,
+        tags: Optional[List[str]] = None,
+    ) -> tuple:
+        """Run dual-layer (keyword + LLM) content safety review.
+
+        Returns:
+            ``(safe: bool, reason: Optional[str])``.
+        """
+        return await self.content_reviewer.areview(title, description, tags)
+
     async def get(
         self,
         memory_id: int,

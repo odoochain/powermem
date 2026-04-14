@@ -17,6 +17,7 @@ from .utils import (
     extract_json,
     load_config_from_env,
     convert_config_object_to_dict,
+    strip_think_tags,
 )
 from .oceanbase_util import OceanBaseUtil
 
@@ -33,5 +34,6 @@ __all__ = [
     "extract_json",
     "load_config_from_env",
     "convert_config_object_to_dict",
+    "strip_think_tags",
     "OceanBaseUtil",
 ]
