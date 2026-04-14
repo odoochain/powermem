@@ -289,6 +289,7 @@ class StorageAdapter:
             content = result.payload.get("data") or result.payload.get("content") or ""
             memory = {
                 "id": result.id,
+                "memory": content,
                 "content": content,
                 "user_id": result.payload.get("user_id"),
                 "agent_id": result.payload.get("agent_id"),
@@ -297,15 +298,15 @@ class StorageAdapter:
                 "created_at": result.payload.get("created_at"),
                 "updated_at": result.payload.get("updated_at"),
             }
-            
+
             # Check access control
             if user_id and memory.get("user_id") != user_id:
                 return None
             if agent_id and memory.get("agent_id") != agent_id:
                 return None
-            
+
             return memory
-        
+
         # If not found in main store and sub stores exist, search sub stores
         if self.sub_stores:
             for sub_config in self.sub_stores.values():
@@ -315,7 +316,8 @@ class StorageAdapter:
                         content = result.payload.get("data") or result.payload.get("content") or ""
                         memory = {
                             "id": result.id,
-                             "content": content,
+                            "memory": content,
+                            "content": content,
                             "user_id": result.payload.get("user_id"),
                             "agent_id": result.payload.get("agent_id"),
                             "run_id": result.payload.get("run_id"),
