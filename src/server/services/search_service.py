@@ -34,6 +34,7 @@ class SearchService:
         agent_id: Optional[str] = None,
         run_id: Optional[str] = None,
         filters: Optional[Dict[str, Any]] = None,
+        threshold: Optional[float] = None,
         limit: int = 30,
     ) -> Dict[str, Any]:
         """
@@ -67,6 +68,7 @@ class SearchService:
                 agent_id=agent_id,
                 run_id=run_id,
                 filters=filters,
+                threshold=threshold,
                 limit=limit,
             )
             

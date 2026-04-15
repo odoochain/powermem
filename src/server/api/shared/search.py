@@ -16,6 +16,7 @@ def do_search(
     agent_id: Optional[str],
     run_id: Optional[str],
     filters: Optional[dict],
+    threshold: Optional[float],
     limit: int,
 ):
     results = service.search_memories(
@@ -24,6 +25,7 @@ def do_search(
         agent_id=agent_id,
         run_id=run_id,
         filters=filters,
+        threshold=threshold,
         limit=limit,
     )
     search_results = [

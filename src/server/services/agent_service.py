@@ -383,6 +383,8 @@ class AgentService:
                 scope = scope.value
             elif not isinstance(scope, str):
                 scope = None
+            elif scope.strip().upper() == "AGENT":
+                scope = "agent_group"
             
             self.agent_memory.add(
                 content=content,

@@ -71,6 +71,12 @@ class SearchRequest(BaseModel):
     agent_id: Optional[str] = Field(None, description="Filter by agent ID")
     run_id: Optional[str] = Field(None, description="Filter by run ID")
     filters: Optional[Dict[str, Any]] = Field(None, description="Additional filters")
+    threshold: Optional[float] = Field(
+        default=None,
+        ge=0,
+        le=1,
+        description="Minimum quality score threshold (0-1) for filtering results",
+    )
     limit: int = Field(default=30, ge=1, le=100, description="Maximum number of results")
 
 

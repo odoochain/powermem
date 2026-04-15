@@ -42,7 +42,16 @@ async def search_memories_post(
     service: SearchService = Depends(get_search_service),
 ):
     """Search memories (POST method)"""
-    return do_search(service, body.query, body.user_id, body.agent_id, body.run_id, body.filters, body.limit)
+    return do_search(
+        service,
+        body.query,
+        body.user_id,
+        body.agent_id,
+        body.run_id,
+        body.filters,
+        body.threshold,
+        body.limit,
+    )
 
 
 @router.get(
@@ -58,9 +67,15 @@ async def search_memories_get(
     user_id: Optional[str] = Query(None, description="Filter by user ID"),
     agent_id: Optional[str] = Query(None, description="Filter by agent ID"),
     run_id: Optional[str] = Query(None, description="Filter by run ID"),
+    threshold: Optional[float] = Query(
+        None,
+        ge=0,
+        le=1,
+        description="Minimum quality score threshold (0-1) for filtering results",
+    ),
     limit: int = Query(30, ge=1, le=100, description="Maximum number of results"),
     api_key: str = Depends(verify_api_key),
     service: SearchService = Depends(get_search_service),
 ):
     """Search memories (GET method)"""
-    return do_search(service, query, user_id, agent_id, run_id, None, limit)
+    return do_search(service, query, user_id, agent_id, run_id, None, threshold, limit)

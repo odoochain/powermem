@@ -26,6 +26,7 @@ class AccessPermission(Enum):
     READ = "read"
     WRITE = "write"
     DELETE = "delete"
+    SHARE = "share"
     ADMIN = "admin"
 
 

@@ -185,3 +185,27 @@ class V2UserProfilesRequest(BaseModel):
     fuzzy: bool = Field(False, description="Use fuzzy match for user ID")
     limit: int = Field(20, ge=1, le=1000, description="Maximum number of results")
     offset: int = Field(0, ge=0, description="Number of results to skip")
+
+
+class V2MemoryExportRequest(BaseModel):
+    """v2: export memories (POST with config)"""
+    config: Optional[PowermemConfig] = Field(None, description="Per-request PowerMem configuration")
+    format: str = Field("json", description="Export format: json/csv")
+    user_id: Optional[str] = Field(None, description="Filter by user ID")
+    agent_id: Optional[str] = Field(None, description="Filter by agent ID")
+    run_id: Optional[str] = Field(None, description="Filter by run ID")
+    limit: int = Field(1000, ge=1, le=10000, description="Max memories to export")
+
+
+class V2MemoryImportRequest(BaseModel):
+    """v2: import memories (POST with config)"""
+    config: Optional[PowermemConfig] = Field(None, description="Per-request PowerMem configuration")
+    source: str = Field(..., description="Content string in json/csv format")
+    format: str = Field("json", description="Import format: json/csv")
+    user_id: Optional[str] = Field(None, description="Override user ID")
+    agent_id: Optional[str] = Field(None, description="Override agent ID")
+
+
+class V2SystemStatusRequest(BaseModel):
+    """v2: system status (POST with config)"""
+    config: Optional[PowermemConfig] = Field(None, description="Per-request PowerMem configuration")

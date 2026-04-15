@@ -317,7 +317,7 @@ class AgentMemorySettings(_BasePowermemSettings):
 
     enabled: bool = Field(default=True)
     memory_mode: str = Field(default="auto", serialization_alias="mode")
-    default_scope: str = Field(default="AGENT")
+    default_scope: str = Field(default="AGENT_GROUP")
     default_privacy_level: str = Field(default="PRIVATE")
     default_collaboration_level: str = Field(default="READ_ONLY")
     default_access_permission: str = Field(default="OWNER_ONLY")
