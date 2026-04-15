@@ -546,7 +546,7 @@ class MultiAgentMemoryManager(AgentMemoryManagerBase):
                 try:
                     scope = MemoryScope(scope_str) if isinstance(scope_str, str) else scope_str
                 except (ValueError, TypeError):
-                    scope = MemoryScope.AGENT  # Default scope
+                    scope = MemoryScope.AGENT_GROUP
                 
                 try:
                     memory_type = MemoryType(memory_type_str) if isinstance(memory_type_str, str) else memory_type_str
