@@ -1092,8 +1092,24 @@ class MultiAgentMemoryManager(AgentMemoryManagerBase):
         """Find a memory by ID across all scopes and types."""
         for scope in MemoryScope:
             for memory_type in MemoryType:
-                if memory_id in self.scope_memories[scope][memory_type]:
-                    return self.scope_memories[scope][memory_type][memory_id]
+                store = self.scope_memories[scope][memory_type]
+                if memory_id in store:
+                    return store[memory_id]
+
+                # IDs can be int/str depending on source (database/cache), so
+                # normalize both forms before giving up.
+                try:
+                    if isinstance(memory_id, str) and memory_id.isdigit():
+                        numeric_id = int(memory_id)
+                        if numeric_id in store:
+                            return store[numeric_id]
+                except Exception:
+                    pass
+
+                target_id = str(memory_id)
+                for key, value in store.items():
+                    if str(key) == target_id:
+                        return value
         return None
     
     def create_group(self, group_name: str, agent_ids: List[str], permissions: Optional[Dict[str, List[str]]] = None) -> Dict[str, Any]:
