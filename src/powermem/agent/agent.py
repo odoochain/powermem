@@ -760,7 +760,7 @@ class AgentMemory:
         Returns:
             Dictionary containing sharing result
         """
-        if self.mode not in ['multi_agent', 'hybrid']:
+        if self.mode not in ['multi_agent', 'hybrid', 'auto']:
             raise RuntimeError(f"share_memory() not supported in {self.mode} mode")
         
         if hasattr(self._agent_manager, 'share_memory'):

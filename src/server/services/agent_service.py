@@ -250,7 +250,8 @@ class AgentService:
                     if hasattr(self.agent_memory, 'share_memory'):
                         # Check if the mode supports share_memory
                         current_mode = self.agent_memory.get_mode() if hasattr(self.agent_memory, 'get_mode') else None
-                        if current_mode in ['multi_agent', 'hybrid']:
+                        # 'auto' loads MultiAgentMemoryManager (same as multi_agent); without this we always fall back to DB copy
+                        if current_mode in ['multi_agent', 'hybrid', 'auto']:
                             use_share_method = True
                     
                     if use_share_method:
@@ -386,9 +387,12 @@ class AgentService:
             elif scope.strip().upper() == "AGENT":
                 scope = "agent_group"
             
+            uid = memory.get("user_id")
+            if uid is None and isinstance(memory.get("metadata"), dict):
+                uid = memory["metadata"].get("user_id")
             self.agent_memory.add(
                 content=content,
-                user_id=memory.get("user_id"),
+                user_id=uid,
                 agent_id=target_agent_id,
                 metadata=memory.get("metadata", {}),
                 scope=scope,

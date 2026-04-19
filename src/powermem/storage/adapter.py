@@ -159,9 +159,22 @@ class StorageAdapter:
             effective_filters["agent_id"] = agent_id
         if run_id is not None:
             effective_filters["run_id"] = run_id
+
+        # Cross-agent shares are recorded in metadata.shared_with (persisted on share API).
+        # Filtering strictly by agent_id would hide memories owned by another agent but shared to
+        # this viewer. When both tenant user_id and viewer agent_id are present, widen the DB
+        # query (drop agent_id) and post-filter by owner or metadata.shared_with.
+        share_aware_search = user_id is not None and agent_id is not None
+        store_filters = dict(effective_filters)
+        search_limit = limit
+        if share_aware_search:
+            store_filters.pop("agent_id", None)
+            search_limit = min(max(limit * 25, limit), 400)
         
         # Route to target store (main or sub store)
-        target_store = self._route_to_store(effective_filters)
+        target_store = self._route_to_store(store_filters if share_aware_search else effective_filters)
+        filters_for_store = store_filters if share_aware_search else effective_filters
+        store_result_limit = search_limit if share_aware_search else limit
 
         # Unified search method - try OceanBase format first, fallback to SQLite
         # Pass query text to enable hybrid search (vector + full-text search)
@@ -177,8 +190,8 @@ class StorageAdapter:
             search_kwargs = {
                 "query": search_query,
                 "vectors": query_vector,
-                "limit": limit,
-                "filters": effective_filters,
+                "limit": store_result_limit,
+                "filters": filters_for_store,
             }
             if 'sparse_embedding' in search_params:
                 search_kwargs["sparse_embedding"] = sparse_embedding
@@ -189,7 +202,12 @@ class StorageAdapter:
         except TypeError:
             # Fallback to SQLite format (doesn't support query text parameter)
             # Pass filters to ensure filtering works correctly
-            results = target_store.search(search_query if query else "", vectors=[query_vector], limit=limit, filters=effective_filters)
+            results = target_store.search(
+                search_query if query else "",
+                vectors=[query_vector],
+                limit=store_result_limit,
+                filters=filters_for_store,
+            )
         
         # Convert results to unified format
         memories = []
@@ -269,11 +287,19 @@ class StorageAdapter:
                 "metadata": user_metadata if user_metadata else {},  # Add user metadata
             }
             
-            # No need to apply filters here - filters are already applied at the database level
-            # in vector_store.search(), so all returned results should already match the filters
             memories.append(memory)
-        
-        # Vector store already applied limit, no need to slice again
+
+        if share_aware_search and agent_id is not None:
+            visible = []
+            for m in memories:
+                md = m.get("metadata") or {}
+                viewers = md.get("shared_with") or []
+                if m.get("agent_id") == agent_id or agent_id in viewers:
+                    visible.append(m)
+            memories = visible[:limit]
+        else:
+            memories = memories[:limit]
+
         return memories
     
     def get_memory(

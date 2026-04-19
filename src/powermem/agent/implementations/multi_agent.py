@@ -627,6 +627,69 @@ class MultiAgentMemoryManager(AgentMemoryManagerBase):
                         else:
                             logger.debug(f"Scope access denied for agent {agent_id} on memory {memory_id}")
             
+            # Memories shared *to* this agent: primary DB query filters by agent_id and omits the owner's row.
+            # share_memory() grants READ on the canonical memory id — load those rows by id.
+            try:
+                filter_uid = filters.get("user_id") if filters else None
+                seen_ids = {str(m.get("id")) for m in accessible_memories if m.get("id") is not None}
+                for mem_key, agents_map in self.permission_controller.memory_permissions.items():
+                    if agent_id not in agents_map:
+                        continue
+                    if AccessPermission.READ not in agents_map[agent_id]:
+                        continue
+                    try:
+                        mid_int = int(mem_key) if not isinstance(mem_key, int) else mem_key
+                    except (TypeError, ValueError):
+                        continue
+                    if str(mid_int) in seen_ids:
+                        continue
+                    raw_get = self._memory_instance.get(mid_int, user_id=None, agent_id=None)
+                    if not raw_get:
+                        continue
+                    if filter_uid is not None and raw_get.get("user_id") != filter_uid:
+                        continue
+                    if raw_get.get("agent_id") == agent_id:
+                        continue
+                    db_memory = raw_get
+                    memory_id = db_memory.get("id", mid_int)
+                    content = db_memory.get("memory") or db_memory.get("content") or db_memory.get("document", "")
+                    memory_data = {
+                        "id": memory_id,
+                        "content": content,
+                        "agent_id": db_memory.get("agent_id", agent_id),
+                        "user_id": db_memory.get("user_id"),
+                        "run_id": db_memory.get("run_id"),
+                        "metadata": db_memory.get("metadata", {}),
+                        "created_at": db_memory.get("created_at"),
+                        "updated_at": db_memory.get("updated_at"),
+                        "access_count": 0,
+                        "last_accessed": None,
+                    }
+                    metadata = memory_data.get("metadata", {})
+                    scope_str = metadata.get("scope") or metadata.get("agent", {}).get("scope", "agent")
+                    memory_type_str = metadata.get("memory_type") or metadata.get("agent", {}).get("memory_type", "working")
+                    try:
+                        scope = MemoryScope(scope_str) if isinstance(scope_str, str) else scope_str
+                    except (ValueError, TypeError):
+                        scope = MemoryScope.AGENT_GROUP
+                    try:
+                        memory_type = MemoryType(memory_type_str) if isinstance(memory_type_str, str) else memory_type_str
+                    except (ValueError, TypeError):
+                        memory_type = MemoryType.WORKING
+                    memory_data["scope"] = scope
+                    memory_data["memory_type"] = memory_type
+                    if memory_id not in self.scope_memories[scope][memory_type]:
+                        self.scope_memories[scope][memory_type][memory_id] = memory_data
+                    if self.scope_controller and memory_id not in self.scope_controller.scope_storage[scope][memory_type]:
+                        self.scope_controller.scope_storage[scope][memory_type][memory_id] = memory_data
+                    total_memories += 1
+                    scope_access_passed += 1
+                    permission_passed += 1
+                    accessible_memories.append(memory_data)
+                    seen_ids.add(str(memory_id))
+            except Exception as e:
+                logger.warning(f"Could not merge cross-agent shared memories for {agent_id}: {e}")
+            
             # Apply query filtering if provided
             if query:
                 accessible_memories = [
@@ -840,7 +903,20 @@ class MultiAgentMemoryManager(AgentMemoryManagerBase):
                                 break
             
             logger.info(f"Shared memory {memory_id} from {from_agent} to {len(shared_with)} agents")
-            
+
+            # Persist recipients so subsequent HTTP requests (new AgentMemory instances) can search/list.
+            uniq_recipients: List[str] = []
+            for aid in shared_with:
+                if aid not in uniq_recipients:
+                    uniq_recipients.append(aid)
+            try:
+                self._persist_shared_with_to_storage(memory_id, uniq_recipients)
+            except Exception as persist_err:
+                logger.warning(
+                    "Persisting shared_with to vector store failed (share still in RAM): %s",
+                    persist_err,
+                )
+
             return {
                 'success': True,
                 'memory_id': memory_id,
@@ -853,6 +929,51 @@ class MultiAgentMemoryManager(AgentMemoryManagerBase):
             logger.error(f"Failed to share memory {memory_id}: {e}")
             raise
     
+    def _persist_shared_with_to_storage(self, memory_id: Any, recipients: List[str]) -> None:
+        """Merge recipients into payload metadata.shared_with in the backing Memory store."""
+        if not recipients:
+            return
+        try:
+            mid_int = int(memory_id) if not isinstance(memory_id, int) else memory_id
+        except (TypeError, ValueError):
+            logger.warning(f"Cannot persist shared_with: invalid memory id {memory_id!r}")
+            return
+
+        if not hasattr(self, "_memory_instance"):
+            from powermem.core.memory import Memory
+            if hasattr(self.config, "_data"):
+                config_dict = self.config._data
+            elif hasattr(self.config, "to_dict"):
+                config_dict = self.config.to_dict()
+            else:
+                config_dict = self.config
+            self._memory_instance = Memory(config_dict)
+
+        existing = self._memory_instance.get(mid_int, user_id=None, agent_id=None)
+        if not existing:
+            logger.warning(f"Persist shared_with: memory {mid_int} not found in storage")
+            return
+
+        md = dict(existing.get("metadata") or {})
+        sw = list(md.get("shared_with") or [])
+        for aid in recipients:
+            if aid not in sw:
+                sw.append(aid)
+        md["shared_with"] = sw
+
+        content = existing.get("memory") or existing.get("content") or ""
+        if isinstance(content, str) and not content.strip():
+            logger.warning(f"Persist shared_with: empty content for memory {mid_int}, skipping storage update")
+            return
+
+        self._memory_instance.update(
+            mid_int,
+            content=content,
+            user_id=existing.get("user_id"),
+            agent_id=existing.get("agent_id"),
+            metadata=md,
+        )
+
     def get_context_info(self, agent_id: str) -> Dict[str, Any]:
         """
         Get context information for an agent.
