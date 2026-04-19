@@ -152,6 +152,10 @@ class V2AgentMemoriesRequest(BaseModel):
     config: Optional[PowermemConfig] = Field(None, description="Per-request PowerMem configuration")
     limit: int = Field(100, ge=1, le=1000, description="Maximum number of results")
     offset: int = Field(0, ge=0, description="Number of results to skip")
+    user_id: Optional[str] = Field(
+        None,
+        description="Tenant user scope; required for inbound shared list (metadata.shared_with)",
+    )
 
 
 class V2DeleteAllRequest(BaseModel):

@@ -2,6 +2,8 @@
 Shared agent memory business logic (v1 + v2).
 """
 
+from typing import Optional
+
 from ...models.request import AgentMemoryCreateRequest, AgentMemoryShareRequest
 from ...models.response import APIResponse, MemoryListResponse
 from ...services.agent_service import AgentService
@@ -52,8 +54,19 @@ def do_share_memories(service: AgentService, agent_id: str, body: AgentMemorySha
     )
 
 
-def do_get_shared_memories(service: AgentService, agent_id: str, limit: int, offset: int):
-    memories = service.get_shared_memories(agent_id=agent_id, limit=limit, offset=offset)
+def do_get_shared_memories(
+    service: AgentService,
+    agent_id: str,
+    limit: int,
+    offset: int,
+    user_id: Optional[str] = None,
+):
+    memories = service.get_shared_memories(
+        agent_id=agent_id,
+        limit=limit,
+        offset=offset,
+        user_id=user_id,
+    )
     memory_responses = [memory_dict_to_response(m) for m in memories]
     response_data = MemoryListResponse(
         memories=memory_responses,

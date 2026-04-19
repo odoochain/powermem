@@ -23,7 +23,8 @@ class AgentService:
         """
         if config is None:
             config = auto_config()
-        
+
+        self._config = config
         self.agent_memory = AgentMemory(config=config)
         logger.info("AgentService initialized")
     
@@ -407,21 +408,59 @@ class AgentService:
         agent_id: str,
         limit: int = 100,
         offset: int = 0,
+        user_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """
-        Get shared memories for an agent.
-        
-        Note: This is a simplified implementation. Full implementation would
-        track sharing relationships.
-        
-        Args:
-            agent_id: Agent ID
-            limit: Maximum number of results
-            offset: Number of results to skip
-            
-        Returns:
-            List of shared memories
+        List memories **shared to** this agent (inbound).
+
+        Rows remain owned by the source agent; sharing is recorded in ``metadata.shared_with``.
+        Requires ``user_id`` to scan the tenant namespace; without it, falls back to
+        :meth:`get_agent_memories` (legacy, owner-only rows).
         """
-        # For now, return all memories for the agent
-        # In a full implementation, this would filter for shared memories only
-        return self.get_agent_memories(agent_id, limit, offset)
+        try:
+            if not agent_id:
+                raise APIError(
+                    code=ErrorCode.INVALID_REQUEST,
+                    message="agent_id is required",
+                    status_code=400,
+                )
+
+            if not user_id:
+                logger.warning(
+                    "get_shared_memories called without user_id; returning agent-owned memories only "
+                    "(inbound shares require user_id)"
+                )
+                return self.get_agent_memories(agent_id, limit, offset)
+
+            from powermem.core.memory import Memory
+
+            mem = Memory(self._config)
+            res = mem.get_all(user_id=user_id, agent_id=None, limit=50000, offset=0)
+            rows = res.get("results", []) if isinstance(res, dict) else []
+
+            inbound: List[Dict[str, Any]] = []
+            for r in rows:
+                md = r.get("metadata") if isinstance(r.get("metadata"), dict) else {}
+                shared_with = md.get("shared_with") or []
+                owner = r.get("agent_id")
+                if owner == agent_id:
+                    continue
+                if agent_id not in shared_with:
+                    continue
+                inbound.append(r)
+
+            inbound.sort(
+                key=lambda x: (str(x.get("updated_at") or ""), x.get("id") or 0),
+                reverse=True,
+            )
+            return inbound[offset : offset + limit]
+
+        except APIError:
+            raise
+        except Exception as e:
+            logger.error(f"Failed to get shared memories for {agent_id}: {e}", exc_info=True)
+            raise APIError(
+                code=ErrorCode.INTERNAL_ERROR,
+                message=f"Failed to get shared memories: {str(e)}",
+                status_code=500,
+            )

@@ -89,4 +89,10 @@ async def get_shared_memories_v2(
     api_key: str = Depends(verify_api_key),
 ):
     service = AgentService(config=resolve_config(body.config))
-    return do_get_shared_memories(service, agent_id, body.limit, body.offset)
+    return do_get_shared_memories(
+        service,
+        agent_id,
+        body.limit,
+        body.offset,
+        user_id=body.user_id,
+    )
