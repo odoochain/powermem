@@ -4,11 +4,56 @@ Agent service for PowerMem API
 
 import logging
 from typing import Any, Dict, List, Optional
+
 from powermem import auto_config
 from powermem.agent import AgentMemory
 from ..models.errors import ErrorCode, APIError
 
 logger = logging.getLogger("server")
+
+
+def _normalize_shared_with_entries(raw: Any) -> List[str]:
+    """Normalize metadata.shared_with into comparable agent id strings."""
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        s = raw.strip()
+        return [s] if s else []
+    if not isinstance(raw, (list, tuple, set)):
+        s = str(raw).strip()
+        return [s] if s else []
+    out: List[str] = []
+    for x in raw:
+        if isinstance(x, str):
+            s = x.strip()
+            if s:
+                out.append(s)
+        elif isinstance(x, dict):
+            aid = x.get("agent_id") or x.get("id") or x.get("agentId")
+            if aid is not None:
+                s = str(aid).strip()
+                if s:
+                    out.append(s)
+    return out
+
+
+def _viewer_has_inbound_share(
+    metadata: Dict[str, Any],
+    memory_row: Dict[str, Any],
+    viewer_agent_id: str,
+) -> bool:
+    """True if memory is shared to viewer_agent_id (handles nested / alternate keys)."""
+    if not viewer_agent_id:
+        return False
+    md = metadata if isinstance(metadata, dict) else {}
+    sw = md.get("shared_with")
+    if sw is None and md.get("sharedWith") is not None:
+        sw = md.get("sharedWith")
+    if sw is None and isinstance(memory_row.get("shared_with"), (list, tuple, str)):
+        sw = memory_row.get("shared_with")
+    targets = _normalize_shared_with_entries(sw)
+    v = viewer_agent_id.strip()
+    return v in targets
 
 
 class AgentService:
@@ -438,16 +483,46 @@ class AgentService:
             res = mem.get_all(user_id=user_id, agent_id=None, limit=50000, offset=0)
             rows = res.get("results", []) if isinstance(res, dict) else []
 
+            viewer = agent_id.strip()
             inbound: List[Dict[str, Any]] = []
             for r in rows:
                 md = r.get("metadata") if isinstance(r.get("metadata"), dict) else {}
-                shared_with = md.get("shared_with") or []
-                owner = r.get("agent_id")
-                if owner == agent_id:
+                owner_raw = r.get("agent_id")
+                owner = str(owner_raw).strip() if owner_raw is not None else ""
+                if owner and owner == viewer:
                     continue
-                if agent_id not in shared_with:
+                if not _viewer_has_inbound_share(md, r, viewer):
                     continue
                 inbound.append(r)
+
+            if user_id and not inbound:
+                if not rows:
+                    logger.info(
+                        "get_shared_memories: viewer=%s user_id=%s — tenant scan returned 0 rows. "
+                        "Memories stored under another user_id will never appear here.",
+                        viewer,
+                        user_id,
+                    )
+                else:
+                    samples: List[str] = []
+                    for r in rows[:80]:
+                        md = r.get("metadata") if isinstance(r.get("metadata"), dict) else {}
+                        samples.extend(
+                            _normalize_shared_with_entries(md.get("shared_with") or md.get("sharedWith")),
+                        )
+                        if isinstance(r.get("shared_with"), (list, tuple, str)):
+                            samples.extend(_normalize_shared_with_entries(r.get("shared_with")))
+                    uniq = list(dict.fromkeys(samples))[:16]
+                    logger.info(
+                        "get_shared_memories: viewer=%s user_id=%s scanned %d rows but inbound=0; "
+                        "distinct shared_with targets seen (sample): %s. "
+                        "Check share target_agent_id matches viewer, same user_id as stored memory, "
+                        "and metadata.shared_with persisted.",
+                        viewer,
+                        user_id,
+                        len(rows),
+                        uniq if uniq else "(none)",
+                    )
 
             inbound.sort(
                 key=lambda x: (str(x.get("updated_at") or ""), x.get("id") or 0),
