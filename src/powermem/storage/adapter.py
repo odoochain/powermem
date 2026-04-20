@@ -376,7 +376,6 @@ class StorageAdapter:
         # First check if memory exists and user has access (get_memory returns dict)
         existing_memory_dict = self.get_memory(memory_id, user_id, agent_id)
         if not existing_memory_dict:
-            logger.warning(f"Memory {memory_id} not found or access denied")
             return None
         
         # Get raw OutputData object from vector store to access payload
