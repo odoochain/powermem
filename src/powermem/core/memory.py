@@ -33,7 +33,15 @@ from ..intelligence.search_query_optimizer import SearchQueryOptimizer
 from ..intelligence.experience_query_rewriter import ExperienceQueryRewriter
 from ..intelligence.experience_manager import ExperienceManager
 from ..intelligence.content_reviewer import ContentReviewer
-from ..utils.utils import remove_code_blocks, convert_config_object_to_dict, parse_vision_messages, set_timezone, strip_think_tags
+from ..utils.utils import (
+    convert_config_object_to_dict,
+    parse_vision_messages,
+    set_timezone,
+    llm_json_text_with_fallback,
+    parse_fact_extraction_json,
+    parse_memory_actions_json,
+    strip_think_tags,
+)
 from ..utils.io import export_to_json, export_to_csv, import_from_json, import_from_csv
 from ..prompts.intelligent_memory_prompts import (
     FACT_RETRIEVAL_PROMPT,
@@ -497,29 +505,36 @@ class Memory(MemoryBase):
                 system_prompt = FACT_RETRIEVAL_PROMPT.format(today=today)
             user_prompt = f"Input:\n{conversation}"
             
-            # Call LLM to extract facts
+            # Call LLM to extract facts (empty bodies under json_object are common on some gateways)
             try:
-                response = self.llm.generate_response(
+                response = llm_json_text_with_fallback(
+                    self.llm,
                     messages=[
                         {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_prompt}
+                        {"role": "user", "content": user_prompt},
                     ],
-                    response_format={"type": "json_object"}
                 )
             except Exception as e:
                 logger.error(f"Error in fact extraction: {e}")
                 response = ""
             
-            # Parse response — strip reasoning tags then code fences
             try:
-                response = strip_think_tags(response)
-                response = remove_code_blocks(response)
-                facts_data = json.loads(response)
-                facts = facts_data.get("facts", [])
-                
-                # Log for debugging
+                response_text = strip_think_tags(str(response or ""))
+                facts = parse_fact_extraction_json(response_text)
+                if not facts and response_text.strip():
+                    logger.debug(
+                        "Fact extraction parsed no facts from non-empty body; retrying without response_format"
+                    )
+                    response_plain = self.llm.generate_response(
+                        messages=[
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": user_prompt},
+                        ],
+                        response_format=None,
+                    )
+                    response_plain_text = strip_think_tags(str(response_plain or ""))
+                    facts = parse_fact_extraction_json(response_plain_text)
                 logger.debug(f"Extracted {len(facts)} facts: {facts}")
-                
                 return facts
             except Exception as e:
                 logger.error(f"Error in new_retrieved_facts: {e}")
@@ -569,22 +584,28 @@ class Memory(MemoryBase):
                 custom_prompt = self.custom_update_memory_prompt
             update_prompt = get_memory_update_prompt(old_memory, new_facts, custom_prompt)
             
-            # Call LLM
             try:
-                response = self.llm.generate_response(
+                response = llm_json_text_with_fallback(
+                    self.llm,
                     messages=[{"role": "user", "content": update_prompt}],
-                    response_format={"type": "json_object"}
                 )
             except Exception as e:
                 logger.error(f"Error in new memory actions response: {e}")
                 response = ""
             
-            # Parse response — strip reasoning tags then code fences
             try:
-                response = strip_think_tags(response)
-                response = remove_code_blocks(response)
-                actions_data = json.loads(response)
-                actions = actions_data.get("memory", [])
+                response_text = strip_think_tags(str(response or ""))
+                actions = parse_memory_actions_json(response_text)
+                if not actions and response_text.strip():
+                    logger.debug(
+                        "Memory actions JSON empty after parse; retrying without response_format"
+                    )
+                    response_plain = self.llm.generate_response(
+                        messages=[{"role": "user", "content": update_prompt}],
+                        response_format=None,
+                    )
+                    response_plain_text = strip_think_tags(str(response_plain or ""))
+                    actions = parse_memory_actions_json(response_plain_text)
                 return actions
             except Exception as e:
                 logger.error(f"Invalid JSON response: {e}")
