@@ -8,6 +8,7 @@ on:
       - 'tests/**'
       - 'pyproject.toml'
       - 'Makefile'
+      - '.github/workflows/regression.yml'
   pull_request_target:
     branches: [main]
     paths:
@@ -15,6 +16,7 @@ on:
       - 'tests/**'
       - 'pyproject.toml'
       - 'Makefile'
+      - '.github/workflows/regression.yml'
   workflow_dispatch:
     inputs:
       pr_number:
@@ -160,6 +162,7 @@ jobs:
           set_env_var LLM_API_KEY "${SILICONFLOW_CN_API_KEY}"
           set_env_var EMBEDDING_API_KEY "${QWEN_API_KEY}"
           set_env_var POWERMEM_SERVER_API_KEYS key1,key2,key3
+          set_env_var POWERMEM_SERVER_WORKERS 1
 
       - name: Run regression tests
         id: run_tests
@@ -170,6 +173,15 @@ jobs:
         run: |
           mkdir -p report
           pytest tests/regression/test_scenario*.py -vs --junitxml=report/test1.xml
+      - name: Dump server log on failure
+        if: failure()
+        run: |
+          make server-status || true
+          if [ -f server.log ]; then
+            tail -n 200 server.log
+          else
+            echo "server.log not found"
+          fi
       - name: Upload JUnit report
         if: always() && (steps.run_tests.outcome == 'success' || steps.run_tests.outcome == 'failure')
         uses: actions/upload-artifact@v7
@@ -314,6 +326,7 @@ jobs:
           set_env_var LLM_API_KEY "${SILICONFLOW_CN_API_KEY}"
           set_env_var EMBEDDING_API_KEY "${QWEN_API_KEY}"
           set_env_var POWERMEM_SERVER_API_KEYS key1,key2,key3
+          set_env_var POWERMEM_SERVER_WORKERS 1
 
       - name: Run regression tests
         id: run_tests
@@ -324,6 +337,15 @@ jobs:
         run: |
           mkdir -p report
           pytest tests/regression/ --ignore-glob='*test_scenario*.py' -vs --junitxml=report/test2.xml
+      - name: Dump server log on failure
+        if: failure()
+        run: |
+          make server-status || true
+          if [ -f server.log ]; then
+            tail -n 200 server.log
+          else
+            echo "server.log not found"
+          fi
       - name: Upload JUnit report
         if: always() && (steps.run_tests.outcome == 'success' || steps.run_tests.outcome == 'failure')
         uses: actions/upload-artifact@v7
