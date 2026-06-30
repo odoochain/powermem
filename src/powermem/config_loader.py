@@ -107,15 +107,18 @@ class LoggingSettings(_BasePowermemSettings):
 
     level: str = Field(default="DEBUG")
     format: str = Field(
-        default="%(asctime)s - %(name)s - %(levelname)s - [%(request_id)s] [%(user_id)s] [%(agent_id)s] - %(message)s"
+        default=(
+            "{time:YYYY-MM-DD HH:mm:ss,SSS} - {extra[logger_name]} - {level} - "
+            "[{extra[request_id]}] [{extra[user_id]}] [{extra[agent_id]}] - {message}"
+        )
     )
     file: str = Field(default="./logs/powermem.log")
-    max_size: str = Field(default="100MB")
+    max_size: str = Field(default="100 MB")
     backup_count: int = Field(default=5)
     compress_backups: bool = Field(default=True)
     console_enabled: bool = Field(default=True)
     console_level: str = Field(default="INFO")
-    console_format: str = Field(default="%(levelname)s - %(message)s")
+    console_format: str = Field(default="{level} - {message}")
 
     def to_config(self) -> Dict[str, Any]:
         return self.model_dump()

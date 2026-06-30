@@ -1,140 +1,164 @@
 """
-Configure the ``powermem`` logger tree from ``LOGGING_*`` environment variables.
-
-- ``LOGGING_FILE`` (default ``./logs/powermem.log``): file for SDK/storage logs
-- ``LOGGING_LEVEL`` / ``LOGGING_FORMAT``: level and text format for file output
-- ``LOGGING_MAX_SIZE`` / ``LOGGING_BACKUP_COUNT``: rotating file handler
-- ``LOGGING_COMPRESS_BACKUPS``: gzip rotated backup files as ``<file>.N.gz``
-- ``LOGGING_CONSOLE_*``: optional stderr console output for the SDK tree
-
-Note: HTTP server access logs use ``server`` config (e.g. ``server.log``); this module
-only configures the ``powermem.*`` SDK logger tree (default ``./logs/powermem.log``).
+Configure PowerMem logging with loguru sinks.
 """
 
 from __future__ import annotations
 
-import gzip
-import json
 import logging
 import os
-import shutil
 import sys
-from logging.handlers import RotatingFileHandler
-from typing import Optional
+from collections.abc import Iterable
+from typing import Any
 
-from powermem.log_context import TraceContextFilter
+from loguru import logger as loguru_logger
 
-_powermem_logging_configured = False
+from powermem.log_context import get_log_context
+
+_DEFAULT_TEXT_FORMAT = (
+    "{time:YYYY-MM-DD HH:mm:ss,SSS} - {extra[logger_name]} - {level} - "
+    "[{extra[request_id]}] [{extra[user_id]}] [{extra[agent_id]}] - {message}"
+)
+_DEFAULT_CONSOLE_FORMAT = "{level} - {message}"
+_sink_ids_by_key: dict[str, list[int]] = {}
 
 
-def parse_log_max_bytes(size_str: Optional[str], default: int = 100 * 1024 * 1024) -> int:
-    """Parse size strings such as ``100MB``, ``1GB``, or plain byte counts."""
-    if not size_str:
-        return default
-    text = str(size_str).strip().upper()
+def _remove_configured_sinks(sink_key: str) -> None:
+    for sink_id in _sink_ids_by_key.pop(sink_key, []):
+        loguru_logger.remove(sink_id)
+
+
+def _sink_filter(logger_names: tuple[str, ...]):
+    def should_log(record: dict[str, Any]) -> bool:
+        logger_name = record["extra"].get("logger_name", record["name"])
+        return any(
+            logger_name == name or logger_name.startswith(f"{name}.")
+            for name in logger_names
+        )
+
+    return should_log
+
+
+class InterceptHandler(logging.Handler):
+    """Route standard-library logging records into loguru sinks."""
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            level: str | int = loguru_logger.level(record.levelname).name
+        except ValueError:
+            level = record.levelno
+
+        frame, depth = logging.currentframe(), 0
+        while frame and (depth == 0 or frame.f_code.co_filename == logging.__file__):
+            frame = frame.f_back
+            depth += 1
+
+        loguru_logger.bind(logger_name=record.name, **get_log_context()).opt(
+            depth=depth,
+            exception=record.exc_info,
+        ).log(level, record.getMessage())
+
+
+def configure_loguru_logging(
+    *,
+    logger_names: Iterable[str],
+    sink_key: str,
+    level: str = "INFO",
+    log_file: str | None = None,
+    log_format: str | None = _DEFAULT_TEXT_FORMAT,
+    rotation: str | None = None,
+    retention: int | str | None = None,
+    compression: str | None = None,
+    console_enabled: bool = False,
+    console_level: str | None = None,
+    console_format: str | None = _DEFAULT_CONSOLE_FORMAT,
+    console_sink: Any = sys.stderr,
+    default_file_format: str = _DEFAULT_TEXT_FORMAT,
+    default_console_format: str = _DEFAULT_CONSOLE_FORMAT,
+    force: bool = False,
+) -> bool:
+    """
+    Configure loguru sinks and bridge named stdlib logger namespaces.
+    """
+    names = tuple(logger_names)
+    if not names:
+        return False
+
+    if sink_key in _sink_ids_by_key and not force:
+        return False
+
     try:
-        if text.endswith("GB"):
-            return int(float(text[:-2].strip()) * 1024 * 1024 * 1024)
-        if text.endswith("MB"):
-            return int(float(text[:-2].strip()) * 1024 * 1024)
-        if text.endswith("KB"):
-            return int(float(text[:-2].strip()) * 1024)
-        return int(text)
+        loguru_logger.remove(0)
     except ValueError:
-        return default
+        pass
+    _remove_configured_sinks(sink_key)
 
+    active_filter = _sink_filter(names)
+    normalized_level = (level or "INFO").upper()
+    sink_ids: list[int] = []
+    file_format = (log_format or "").strip()
+    console_template = (console_format or "").strip()
 
-class CompressingRotatingFileHandler(RotatingFileHandler):
-    """
-    RotatingFileHandler that keeps backups as ``<base>.1.gz``, ``<base>.2.gz``, ...
+    if log_file:
+        file_template = (
+            default_file_format
+            if file_format.lower() in {"", "json", "text"}
+            else file_format
+        )
+        try:
+            sink_ids.append(
+                loguru_logger.add(
+                    log_file,
+                    level=normalized_level,
+                    format=file_template,
+                    filter=active_filter,
+                    rotation=rotation,
+                    retention=retention,
+                    compression=compression,
+                    encoding="utf-8",
+                    enqueue=False,
+                    serialize=file_format.lower() == "json",
+                )
+            )
+        except Exception as exc:
+            print(f"Warning: Failed to setup file logging: {exc}", file=sys.stderr)
 
-    When ``compress_backups`` is false, defers to the standard uncompressed rotation.
-    """
+    if console_enabled:
+        console_template = (
+            default_console_format
+            if console_template.lower() in {"", "json", "text"}
+            else console_template
+        )
+        sink_ids.append(
+            loguru_logger.add(
+                console_sink,
+                level=(console_level or normalized_level).upper(),
+                format=console_template,
+                filter=active_filter,
+                enqueue=False,
+                serialize=(console_format or "").strip().lower() == "json",
+            )
+        )
 
-    def __init__(self, *args, compress_backups: bool = False, **kwargs):
-        self.compress_backups = compress_backups
-        super().__init__(*args, **kwargs)
+    if not sink_ids:
+        return False
 
-    def _backup_gz_path(self, index: int) -> str:
-        return f"{self.baseFilename}.{index}.gz"
+    for logger_name in names:
+        stdlib_logger = logging.getLogger(logger_name)
+        for handler in list(stdlib_logger.handlers):
+            stdlib_logger.removeHandler(handler)
+            handler.close()
+        stdlib_logger.addHandler(InterceptHandler())
+        stdlib_logger.setLevel(normalized_level)
+        stdlib_logger.propagate = False
 
-    @staticmethod
-    def _gzip_plain_file(plain_path: str, gz_path: str) -> None:
-        with open(plain_path, "rb") as source, gzip.open(gz_path, "wb") as dest:
-            shutil.copyfileobj(source, dest)
-        os.remove(plain_path)
-
-    def _migrate_legacy_plain_backup(self, index: int) -> None:
-        """Upgrade ``<base>.N`` files left by older handlers to ``<base>.N.gz``."""
-        plain = f"{self.baseFilename}.{index}"
-        gz_path = self._backup_gz_path(index)
-        if os.path.exists(plain) and not os.path.exists(gz_path):
-            self._gzip_plain_file(plain, gz_path)
-
-    def doRollover(self) -> None:
-        if not self.compress_backups:
-            return super().doRollover()
-
-        if self.stream:
-            self.stream.close()
-            self.stream = None
-
-        if self.backupCount > 0:
-            oldest = self._backup_gz_path(self.backupCount)
-            if os.path.exists(oldest):
-                os.remove(oldest)
-
-            for index in range(self.backupCount - 1, 0, -1):
-                self._migrate_legacy_plain_backup(index)
-                src = self._backup_gz_path(index)
-                dst = self._backup_gz_path(index + 1)
-                if os.path.exists(src):
-                    if os.path.exists(dst):
-                        os.remove(dst)
-                    os.rename(src, dst)
-
-            if os.path.exists(self.baseFilename):
-                dst = self._backup_gz_path(1)
-                if os.path.exists(dst):
-                    os.remove(dst)
-                staging = f"{self.baseFilename}.1"
-                os.rename(self.baseFilename, staging)
-                self._gzip_plain_file(staging, dst)
-
-        self.stream = self._open()
-
-
-class JsonLogFormatter(logging.Formatter):
-    """JSON formatter for SDK logs, compatible with log aggregation systems."""
-
-    def format(self, record: logging.LogRecord) -> str:
-        entry = {
-            "timestamp": self.formatTime(record),
-            "level": record.levelname,
-            "logger": record.name,
-            "message": record.getMessage(),
-        }
-        for attr in ("request_id", "user_id", "agent_id"):
-            val = getattr(record, attr, None)
-            if val:
-                entry[attr] = val
-        if record.exc_info and record.exc_info[0] is not None:
-            entry["exception"] = self.formatException(record.exc_info)
-        return json.dumps(entry, ensure_ascii=False)
+    _sink_ids_by_key[sink_key] = sink_ids
+    return True
 
 
 def setup_powermem_logging(*, force: bool = False) -> bool:
     """
     Wire ``LOGGING_*`` settings to the ``powermem`` logger namespace.
-
-    Returns True when file logging was configured, False otherwise.
-    Safe to call multiple times; repeats are no-ops unless ``force=True``.
     """
-    global _powermem_logging_configured
-
-    if _powermem_logging_configured and not force:
-        return False
-
     try:
         from powermem.config_loader import LoggingSettings
     except Exception as exc:
@@ -142,71 +166,26 @@ def setup_powermem_logging(*, force: bool = False) -> bool:
         return False
 
     settings = LoggingSettings()
-    if not settings.file:
-        return False
+    configured = configure_loguru_logging(
+        logger_names=("powermem",),
+        sink_key="powermem",
+        level=settings.level,
+        log_file=settings.file,
+        log_format=settings.format,
+        rotation=settings.max_size,
+        retention=settings.backup_count,
+        compression="gz" if settings.compress_backups else None,
+        console_enabled=settings.console_enabled,
+        console_level=settings.console_level,
+        console_format=settings.console_format,
+        console_sink=sys.stderr,
+        force=force,
+    )
 
-    log_level = getattr(logging, (settings.level or "INFO").upper(), logging.INFO)
-    fmt_value = (settings.format or "").strip().lower()
-    if fmt_value == "json":
-        file_formatter = JsonLogFormatter()
-    else:
-        file_formatter = logging.Formatter(
-            settings.format or "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    if configured:
+        logging.getLogger("powermem").debug(
+            "PowerMem SDK logging initialized (file=%s)",
+            os.path.abspath(settings.file) if settings.file else "<disabled>",
         )
 
-    log_file_path = os.path.abspath(settings.file)
-    log_dir = os.path.dirname(log_file_path)
-    if log_dir:
-        os.makedirs(log_dir, exist_ok=True)
-
-    handler_kwargs = {
-        "mode": "a",
-        "maxBytes": parse_log_max_bytes(settings.max_size),
-        "backupCount": settings.backup_count or 5,
-        "encoding": "utf-8",
-    }
-    if settings.compress_backups:
-        file_handler = CompressingRotatingFileHandler(
-            log_file_path, compress_backups=True, **handler_kwargs
-        )
-    else:
-        file_handler = RotatingFileHandler(log_file_path, **handler_kwargs)
-    file_handler.setLevel(log_level)
-    file_handler.setFormatter(file_formatter)
-    file_handler.addFilter(TraceContextFilter())
-
-    powermem_logger = logging.getLogger("powermem")
-    powermem_logger.setLevel(log_level)
-
-    # Replace prior file handlers targeting the same path (idempotent reconfigure).
-    for existing in list(powermem_logger.handlers):
-        if getattr(existing, "baseFilename", None) == log_file_path:
-            powermem_logger.removeHandler(existing)
-            existing.close()
-
-    powermem_logger.addHandler(file_handler)
-
-    if settings.console_enabled:
-        console_level = getattr(
-            logging, (settings.console_level or settings.level or "INFO").upper(), logging.INFO
-        )
-        console_handler = logging.StreamHandler(sys.stderr)
-        console_handler.setLevel(console_level)
-        console_handler.addFilter(TraceContextFilter())
-        console_handler.setFormatter(
-            logging.Formatter(settings.console_format or "%(levelname)s - %(message)s")
-        )
-        has_console = any(
-            isinstance(h, logging.StreamHandler)
-            and not getattr(h, "baseFilename", None)
-            and getattr(h, "stream", None) is sys.stderr
-            for h in powermem_logger.handlers
-        )
-        if not has_console:
-            powermem_logger.addHandler(console_handler)
-
-    powermem_logger.propagate = False
-
-    powermem_logger.debug("PowerMem SDK logging initialized (file=%s)", log_file_path)
-    _powermem_logging_configured = True
-    return True
+    return configured

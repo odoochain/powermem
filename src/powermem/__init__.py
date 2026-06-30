@@ -207,7 +207,7 @@ def from_config(config: Any = None, **kwargs):
                
                - **logging** (Dict[str, Any], optional): Application logging configuration
                  - level (str): Logging level (default: 'DEBUG')
-                 - format (str): Log message format (default: '%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+                 - format (str): Log message format (default: '{time:YYYY-MM-DD HH:mm:ss,SSS} - {extra[logger_name]} - {level} - {message}')
                  - file (str): Path to the log file (default: './logs/powermem.log')
                
                - **version** (str, optional): API version (default: 'v1.1')

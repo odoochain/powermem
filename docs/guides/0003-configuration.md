@@ -871,7 +871,7 @@ Logging settings control general application logging.
 | Configuration | Type | Required | Default | Description |
 |--------------|------|----------|---------|-------------|
 | `LOGGING_LEVEL` | string | No | `DEBUG` | Logging level. Options: `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL` |
-| `LOGGING_FORMAT` | string | No | `%(asctime)s - %(name)s - %(levelname)s - %(message)s` | Log message format (Python logging format) |
+| `LOGGING_FORMAT` | string | No | `{time:YYYY-MM-DD HH:mm:ss,SSS} - {extra[logger_name]} - {level} - {message}` | Log message format |
 | `LOGGING_FILE` | string | No | `./logs/powermem.log` | Path to log file |
 | `LOGGING_MAX_SIZE` | string | No | `100MB` | Maximum size of log file before rotation |
 | `LOGGING_BACKUP_COUNT` | integer | No | `5` | Number of backup log files to keep |
@@ -883,19 +883,19 @@ Logging settings control general application logging.
 |--------------|------|----------|---------|-------------|
 | `LOGGING_CONSOLE_ENABLED` | boolean | No | `true` | Enable console logging |
 | `LOGGING_CONSOLE_LEVEL` | string | No | `INFO` | Console logging level. Options: `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL` |
-| `LOGGING_CONSOLE_FORMAT` | string | No | `%(levelname)s - %(message)s` | Console log message format |
+| `LOGGING_CONSOLE_FORMAT` | string | No | `{level} - {message}` | Console log message format |
 
 **Environment Variables Example:**
 ```env
 LOGGING_LEVEL=DEBUG
-LOGGING_FORMAT=%(asctime)s - %(name)s - %(levelname)s - %(message)s
+LOGGING_FORMAT={time:YYYY-MM-DD HH:mm:ss,SSS} - {extra[logger_name]} - {level} - {message}
 LOGGING_FILE=./logs/powermem.log
 LOGGING_MAX_SIZE=100MB
 LOGGING_BACKUP_COUNT=5
 LOGGING_COMPRESS_BACKUPS=true
 LOGGING_CONSOLE_ENABLED=true
 LOGGING_CONSOLE_LEVEL=INFO
-LOGGING_CONSOLE_FORMAT=%(levelname)s - %(message)s
+LOGGING_CONSOLE_FORMAT={level} - {message}
 ```
 
 **JSON Configuration Example:**
@@ -903,7 +903,7 @@ LOGGING_CONSOLE_FORMAT=%(levelname)s - %(message)s
 {
   "logging": {
     "level": "DEBUG",
-    "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    "format": "{time:YYYY-MM-DD HH:mm:ss,SSS} - {extra[logger_name]} - {level} - {message}",
     "file": "./logs/powermem.log"
   }
 }
@@ -914,7 +914,7 @@ LOGGING_CONSOLE_FORMAT=%(levelname)s - %(message)s
 config = {
     'logging': {
         'level': 'DEBUG',
-        'format': '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        'format': '{time:YYYY-MM-DD HH:mm:ss,SSS} - {extra[logger_name]} - {level} - {message}',
         'file': './logs/powermem.log'
     }
 }
@@ -1196,7 +1196,7 @@ Here's a complete JSON configuration file example (`config.json`) with all optio
   },
   "logging": {
     "level": "DEBUG",
-    "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    "format": "{time:YYYY-MM-DD HH:mm:ss,SSS} - {extra[logger_name]} - {level} - {message}",
     "file": "./logs/powermem.log"
   }
 }

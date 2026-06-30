@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 from contextvars import ContextVar, Token
-from typing import Tuple
+from typing import Dict, Tuple
 
 _ZERO_UUID = "00000000-0000-0000-0000-000000000000"
 
@@ -34,6 +34,14 @@ def reset_log_context(tokens: Tuple[Token, Token, Token]) -> None:
     _request_id_var.reset(tokens[0])
     _user_id_var.reset(tokens[1])
     _agent_id_var.reset(tokens[2])
+
+
+def get_log_context() -> Dict[str, str]:
+    return {
+        "request_id": _request_id_var.get(),
+        "user_id": _user_id_var.get(),
+        "agent_id": _agent_id_var.get(),
+    }
 
 
 class TraceContextFilter(logging.Filter):

@@ -823,7 +823,7 @@ config = {
 | 配置项 | 类型 | 是否必需 | 默认值 | 描述 |
 |--------|------|----------|---------|------|
 | `LOGGING_LEVEL` | string | 否 | `DEBUG` | 日志级别。选项：`DEBUG`、`INFO`、`WARNING`、`ERROR`、`CRITICAL` |
-| `LOGGING_FORMAT` | string | 否 | `%(asctime)s - %(name)s - %(levelname)s - %(message)s` | 日志消息格式（Python 日志格式） |
+| `LOGGING_FORMAT` | string | 否 | `{time:YYYY-MM-DD HH:mm:ss,SSS} - {extra[logger_name]} - {level} - {message}` | 日志消息格式 |
 | `LOGGING_FILE` | string | 否 | `./runtime-output/powermem.txt` | 日志文件路径 |
 | `LOGGING_MAX_SIZE` | string | 否 | `100MB` | 日志文件在轮转前的最大大小 |
 | `LOGGING_BACKUP_COUNT` | integer | 否 | `5` | 保留的备份日志文件数量 |
@@ -835,26 +835,26 @@ config = {
 |--------|------|----------|---------|------|
 | `LOGGING_CONSOLE_ENABLED` | boolean | 否 | `true` | 启用控制台日志记录 |
 | `LOGGING_CONSOLE_LEVEL` | string | 否 | `INFO` | 控制台日志级别。选项：`DEBUG`、`INFO`、`WARNING`、`ERROR`、`CRITICAL` |
-| `LOGGING_CONSOLE_FORMAT` | string | 否 | `%(levelname)s - %(message)s` | 控制台日志消息格式 |
+| `LOGGING_CONSOLE_FORMAT` | string | 否 | `{level} - {message}` | 控制台日志消息格式 |
 
 **环境变量示例：**
 ```env
 LOGGING_LEVEL=DEBUG
-LOGGING_FORMAT=%(asctime)s - %(name)s - %(levelname)s - %(message)s
+LOGGING_FORMAT={time:YYYY-MM-DD HH:mm:ss,SSS} - {extra[logger_name]} - {level} - {message}
 LOGGING_FILE=./runtime-output/powermem.txt
 LOGGING_MAX_SIZE=100MB
 LOGGING_BACKUP_COUNT=5
 LOGGING_COMPRESS_BACKUPS=true
 LOGGING_CONSOLE_ENABLED=true
 LOGGING_CONSOLE_LEVEL=INFO
-LOGGING_CONSOLE_FORMAT=%(levelname)s - %(message)s
+LOGGING_CONSOLE_FORMAT={level} - {message}
 ```
 **JSON 配置示例：**
 ```json
 {
   "logging": {
     "level": "DEBUG",
-    "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    "format": "{time:YYYY-MM-DD HH:mm:ss,SSS} - {extra[logger_name]} - {level} - {message}",
     "file": "./runtime-output/powermem.txt"
   }
 }
@@ -864,7 +864,7 @@ LOGGING_CONSOLE_FORMAT=%(levelname)s - %(message)s
 config = {
     'logging': {
         'level': 'DEBUG',
-        'format': '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        'format': '{time:YYYY-MM-DD HH:mm:ss,SSS} - {extra[logger_name]} - {level} - {message}',
         'file': './runtime-output/powermem.txt'
     }
 }
@@ -1138,7 +1138,7 @@ memory = Memory(config=config)
   },
   "logging": {
     "level": "DEBUG",
-    "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    "format": "{time:YYYY-MM-DD HH:mm:ss,SSS} - {extra[logger_name]} - {level} - {message}",
     "file": "./runtime-output/powermem.txt"
   }
 }

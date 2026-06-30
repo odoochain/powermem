@@ -3,158 +3,52 @@ Logging middleware for PowerMem API
 """
 
 import logging
-import os
 import re
 import sys
-import json
 import time
 import uuid
-from logging.handlers import RotatingFileHandler
 from typing import Callable
+
 from fastapi import Request, Response
 from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.types import ASGIApp
+
+from powermem.logging_config import configure_loguru_logging
+
 from ..config import config
-from ..utils.metrics import get_metrics_collector
 from ..models.errors import APIError
-
-try:
-    from powermem.logging_config import parse_log_max_bytes as _parse_max_bytes
-except ImportError:
-    def _parse_max_bytes(s, default=100 * 1024 * 1024):
-        if not s:
-            return default
-        text = str(s).strip().upper()
-        try:
-            if text.endswith("GB"):
-                return int(float(text[:-2].strip()) * 1024 * 1024 * 1024)
-            if text.endswith("MB"):
-                return int(float(text[:-2].strip()) * 1024 * 1024)
-            if text.endswith("KB"):
-                return int(float(text[:-2].strip()) * 1024)
-            return int(text)
-        except ValueError:
-            return default
-
-
-def _get_server_rotation_params():
-    max_bytes = _parse_max_bytes(os.environ.get("POWERMEM_SERVER_LOG_MAX_SIZE"), default=100 * 1024 * 1024)
-    backup_count = int(os.environ.get("POWERMEM_SERVER_LOG_BACKUP_COUNT", "5"))
-    return max_bytes, backup_count
+from ..utils.metrics import get_metrics_collector
 
 # Setup logger
 logger = logging.getLogger("server")
 
 
 def setup_logging():
-    """Setup logging configuration
-    
-    This function can be safely called multiple times.
-    It will reconfigure loggers if called again.
     """
-    log_level = getattr(logging, config.log_level.upper(), logging.INFO)
-    
-    # Create formatter
-    if config.log_format == "json":
-        formatter = JsonFormatter()
-        text_formatter = None  # JSON format doesn't need text formatter
-    else:
-        # Improved text format with timestamp
-        # Use right-aligned 7-character width for level name to accommodate WARNING/CRITICAL
-        formatter = logging.Formatter(
-            "%(asctime)s %(levelname)7s %(name)s: %(message)s",
-            datefmt="%Y-%m-%d %H:%M:%S"
-        )
-        text_formatter = formatter
-    
-    # Setup file handler if log_file is configured
-    file_handler = None
-    if config.log_file:
-        try:
-            # Create log file directory if it doesn't exist
-            log_file_path = os.path.abspath(config.log_file)
-            log_dir = os.path.dirname(log_file_path)
-            if log_dir and not os.path.exists(log_dir):
-                os.makedirs(log_dir, exist_ok=True)
-            
-            # Use RotatingFileHandler with append mode to preserve history
-            # Max file size: 10MB, keep 5 backup files
-            _max_bytes, _backup_count = _get_server_rotation_params()
-            file_handler = RotatingFileHandler(
-                log_file_path,
-                mode='a',
-                maxBytes=_max_bytes,
-                backupCount=_backup_count,
-                encoding='utf-8'
-            )
-            file_handler.setLevel(log_level)
-            if config.log_format == "json":
-                file_handler.setFormatter(JsonFormatter())
-            else:
-                file_handler.setFormatter(text_formatter)
-        except Exception as e:
-            # If file logging fails, log to stderr and continue with console logging only
-            print(f"Warning: Failed to setup file logging: {e}", file=sys.stderr)
-            file_handler = None
-    
-    # Configure Uvicorn loggers FIRST (before they start logging)
-    # This ensures the initial startup messages have timestamps
-    uvicorn_loggers = [
-        logging.getLogger("uvicorn"),
-        logging.getLogger("uvicorn.error"),
-        logging.getLogger("uvicorn.access"),
-    ]
-    
-    for uvicorn_logger in uvicorn_loggers:
-        uvicorn_logger.setLevel(log_level)
-        # Remove existing handlers to avoid duplicates
-        uvicorn_logger.handlers.clear()
-        
-        # Create console handler for uvicorn
-        uvicorn_console_handler = logging.StreamHandler(sys.stdout)
-        if config.log_format == "json":
-            uvicorn_console_handler.setFormatter(JsonFormatter())
-        else:
-            # Use the same text formatter for consistency
-            uvicorn_console_handler.setFormatter(text_formatter)
-        uvicorn_logger.addHandler(uvicorn_console_handler)
-        
-        # Share the server file handler to avoid rotation race conditions
-        if file_handler:
-            uvicorn_logger.addHandler(file_handler)
-        
-        uvicorn_logger.propagate = False
-    
-    # Setup handler for application logger
-    console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setFormatter(formatter)
-    
-    # Configure application logger
-    logger.setLevel(log_level)
-    # Remove existing handlers to avoid duplicates
-    logger.handlers.clear()
-    logger.addHandler(console_handler)
-    
-    # Add file handler if configured
-    if file_handler:
-        logger.addHandler(file_handler)
-    
-    # Prevent duplicate logs
-    logger.propagate = False
+    Set up server logging.
 
-    # Attach trace context filter so request_id/user_id/agent_id appear in server logs
-    try:
-        from powermem.log_context import TraceContextFilter
-        _trace_filter = TraceContextFilter()
-        for h in logger.handlers:
-            h.addFilter(_trace_filter)
-        for uvicorn_logger in uvicorn_loggers:
-            for h in uvicorn_logger.handlers:
-                h.addFilter(_trace_filter)
-    except ImportError:
-        pass
-    except Exception as e:
-        print(f"Warning: Failed to attach TraceContextFilter: {e}", file=sys.stderr)
+    This function can be safely called multiple times. It reconfigures the
+    server-owned loguru sinks and stdlib logger bridges on each call.
+    """
+    server_text_format = config.log_console_format
+    console_format = (
+        config.log_format if config.log_format == "json" else server_text_format
+    )
+    configure_loguru_logging(
+        logger_names=("server", "uvicorn", "uvicorn.error", "uvicorn.access"),
+        sink_key="server",
+        level=config.log_level,
+        log_file=config.log_file,
+        log_format=config.log_format,
+        rotation=config.log_max_size,
+        retention=config.log_backup_count,
+        compression="gz" if config.log_compress_backups else None,
+        console_enabled=True,
+        console_format=console_format,
+        console_sink=sys.stdout,
+        default_file_format=server_text_format,
+        default_console_format=server_text_format,
+        force=True,
+    )
 
     try:
         from powermem.logging_config import setup_powermem_logging
@@ -162,45 +56,6 @@ def setup_logging():
         setup_powermem_logging()
     except Exception as e:
         print(f"Warning: Failed to setup powermem SDK logging: {e}", file=sys.stderr)
-
-
-class JsonFormatter(logging.Formatter):
-    """JSON formatter for structured logging"""
-    
-    def __init__(self, datefmt=None):
-        super().__init__(datefmt=datefmt or "%Y-%m-%d %H:%M:%S")
-    
-    def format(self, record):
-        log_data = {
-            "timestamp": self.formatTime(record, self.datefmt),
-            "level": record.levelname,
-            "logger": record.name,
-            "message": record.getMessage(),
-        }
-        
-        # Add extra fields
-        if hasattr(record, "request_id"):
-            log_data["request_id"] = record.request_id
-        if hasattr(record, "user_id"):
-            log_data["user_id"] = record.user_id
-        if hasattr(record, "agent_id"):
-            log_data["agent_id"] = record.agent_id
-        if hasattr(record, "method"):
-            log_data["method"] = record.method
-        if hasattr(record, "path"):
-            log_data["path"] = record.path
-        if hasattr(record, "status_code"):
-            log_data["status_code"] = record.status_code
-        if hasattr(record, "duration_ms"):
-            log_data["duration_ms"] = round(record.duration_ms, 2)
-        if hasattr(record, "client"):
-            log_data["client"] = record.client
-        
-        # Add exception info if present
-        if record.exc_info:
-            log_data["exception"] = self.formatException(record.exc_info)
-        
-        return json.dumps(log_data, ensure_ascii=False)
 
 
 _USER_PATH_RE = re.compile(r"/users/([^/]+)")
@@ -233,6 +88,7 @@ class LoggingMiddleware(BaseHTTPMiddleware):
 
         # Propagate trace context to SDK logger tree
         from powermem.log_context import set_log_context, reset_log_context
+
         user_id, agent_id = self._extract_trace_ids(request)
         tokens = set_log_context(
             request_id=request_id,
@@ -251,7 +107,7 @@ class LoggingMiddleware(BaseHTTPMiddleware):
                 "method": request.method,
                 "path": request.url.path,
                 "client": request.client.host if request.client else None,
-            }
+            },
         )
 
         try:
@@ -269,7 +125,7 @@ class LoggingMiddleware(BaseHTTPMiddleware):
                 method=request.method,
                 endpoint=endpoint,
                 status_code=response.status_code,
-                duration=duration
+                duration=duration,
             )
 
             # Log response
@@ -279,7 +135,7 @@ class LoggingMiddleware(BaseHTTPMiddleware):
                     "request_id": request_id,
                     "status_code": response.status_code,
                     "duration_ms": duration * 1000,
-                }
+                },
             )
 
             # Add request ID to response header
@@ -306,7 +162,7 @@ class LoggingMiddleware(BaseHTTPMiddleware):
                 method=request.method,
                 endpoint=endpoint,
                 status_code=status_code,
-                duration=duration
+                duration=duration,
             )
 
             # For expected errors (4xx), log without stack trace
@@ -340,14 +196,11 @@ class LoggingMiddleware(BaseHTTPMiddleware):
 def log_request(request: Request, message: str, **kwargs):
     """
     Log a request with additional context.
-    
+
     Args:
         request: FastAPI request object
         message: Log message
         **kwargs: Additional context
     """
-    extra = {
-        "request_id": getattr(request.state, "request_id", None),
-        **kwargs
-    }
+    extra = {"request_id": getattr(request.state, "request_id", None), **kwargs}
     logger.info(message, extra=extra)

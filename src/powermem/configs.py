@@ -143,7 +143,7 @@ class LoggingConfig(BaseModel):
         description="Logging level"
     )
     format: str = Field(
-        default="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        default="{time:YYYY-MM-DD HH:mm:ss,SSS} - {extra[logger_name]} - {level} - {message}",
         description="Log message format"
     )
     file: str = Field(

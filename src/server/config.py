@@ -63,6 +63,12 @@ class ServerSettings(BaseSettings):
     # works with log shippers. Set to "text" for human-readable terminal logs.
     log_format: str = Field(default="json")
     log_file: Optional[str] = Field(default="server.log")
+    log_max_size: str = Field(default="100 MB")
+    log_backup_count: int = Field(default=5)
+    log_compress_backups: bool = Field(default=False)
+    log_console_format: str = Field(
+        default="{time:YYYY-MM-DD HH:mm:ss} {level:>7} {extra[logger_name]}: {message}"
+    )
 
     # API settings
     api_title: str = Field(default="PowerMem API")
@@ -80,6 +86,7 @@ class ServerSettings(BaseSettings):
         "auth_enabled",
         "rate_limit_enabled",
         "cors_enabled",
+        "log_compress_backups",
         mode="before",
     )
     @classmethod

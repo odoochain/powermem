@@ -4,14 +4,14 @@ Audit logging for memory operations
 This module handles audit logging for compliance and security.
 """
 
-import logging
 import json
-from logging.handlers import RotatingFileHandler
-from typing import Any, Dict, Optional
-from datetime import datetime
-from powermem.utils.utils import get_current_datetime
-from powermem.logging_config import CompressingRotatingFileHandler, parse_log_max_bytes
+import logging
 import os
+from datetime import datetime
+from typing import Any, Dict, Optional
+
+from powermem.logging_config import configure_loguru_logging
+from powermem.utils.utils import get_current_datetime
 
 logger = logging.getLogger(__name__)
 
@@ -20,11 +20,11 @@ class AuditLogger:
     """
     Manages audit logging for memory operations.
     """
-    
+
     def __init__(self, config: Optional[Dict[str, Any]] = None):
         """
         Initialize audit logger.
-        
+
         Args:
             config: Configuration dictionary
         """
@@ -41,35 +41,24 @@ class AuditLogger:
         self.retention_days = self._get_config_value(
             ["retention_days", "audit_retention_days"], 90
         )
-        
-        # Setup audit logger
+
         self.audit_logger = logging.getLogger("audit")
-        self.audit_logger.setLevel(getattr(logging, self.log_level.upper()))
-        
-        # Create rotating file handler if not exists
-        if not self.audit_logger.handlers:
-            log_dir = os.path.dirname(self.log_file)
-            if log_dir:
-                os.makedirs(log_dir, exist_ok=True)
-            compress = self._get_config_value(["compress_logs"], True)
-            rotation_size = self._get_config_value(["log_rotation_size"], "100MB")
-            max_bytes = parse_log_max_bytes(rotation_size)
-            backup_count = self._get_config_value(["backup_count"], 5)
-            if compress:
-                handler = CompressingRotatingFileHandler(
-                    self.log_file, compress_backups=True,
-                    maxBytes=max_bytes, backupCount=backup_count, encoding="utf-8",
-                )
-            else:
-                handler = RotatingFileHandler(
-                    self.log_file, maxBytes=max_bytes, backupCount=backup_count, encoding="utf-8",
-                )
-            formatter = logging.Formatter(
-                '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-            )
-            handler.setFormatter(formatter)
-            self.audit_logger.addHandler(handler)
-        
+        compress = self._get_config_value(["compress_logs"], True)
+        rotation_size = self._get_config_value(["log_rotation_size"], "100 MB")
+        backup_count = self._get_config_value(["backup_count"], 5)
+        configure_loguru_logging(
+            logger_names=("audit",),
+            sink_key="audit",
+            level=self.log_level,
+            log_file=self.log_file,
+            log_format="{message}",
+            rotation=rotation_size,
+            retention=backup_count,
+            compression="gz" if compress else None,
+            console_enabled=False,
+            force=True,
+        )
+
         logger.info(
             f"AuditLogger initialized - enabled: {self.enabled}, log_file: {self.log_file}"
         )
@@ -79,7 +68,7 @@ class AuditLogger:
             if key in self.config:
                 return self.config[key]
         return default
-    
+
     def log_event(
         self,
         event_type: str,
@@ -89,7 +78,7 @@ class AuditLogger:
     ) -> None:
         """
         Log an audit event.
-        
+
         Args:
             event_type: Type of event (e.g., 'memory.add', 'memory.delete')
             details: Event details
@@ -98,7 +87,7 @@ class AuditLogger:
         """
         if not self.enabled:
             return
-        
+
         try:
             audit_entry = {
                 "timestamp": get_current_datetime().isoformat(),
@@ -108,17 +97,15 @@ class AuditLogger:
                 "details": details,
                 "version": "1.1.6",
             }
-            
-            # Log to file
+
             self.audit_logger.info(json.dumps(audit_entry))
-            
-            # Also log to console in debug mode
+
             if self.config.get("debug", False):
                 logger.debug(f"Audit event: {event_type} - {details}")
-            
+
         except Exception as e:
             logger.error(f"Failed to log audit event: {e}", exc_info=True)
-    
+
     async def log_event_async(
         self,
         event_type: str,
@@ -128,7 +115,7 @@ class AuditLogger:
     ) -> None:
         """
         Log an audit event asynchronously.
-        
+
         Args:
             event_type: Type of event
             details: Event details
@@ -138,7 +125,7 @@ class AuditLogger:
         # For now, just call the sync version
         # In a real implementation, this would use async file I/O
         self.log_event(event_type, details, user_id, agent_id)
-    
+
     def log_access(
         self,
         resource_type: str,
@@ -150,7 +137,7 @@ class AuditLogger:
     ) -> None:
         """
         Log access to resources.
-        
+
         Args:
             resource_type: Type of resource (e.g., 'memory', 'user')
             resource_id: ID of the resource
@@ -170,7 +157,7 @@ class AuditLogger:
             user_id=user_id,
             agent_id=agent_id,
         )
-    
+
     def log_security_event(
         self,
         event_type: str,
@@ -181,7 +168,7 @@ class AuditLogger:
     ) -> None:
         """
         Log security-related events.
-        
+
         Args:
             event_type: Type of security event
             severity: Severity level (low, medium, high, critical)
@@ -199,7 +186,7 @@ class AuditLogger:
             user_id=user_id,
             agent_id=agent_id,
         )
-    
+
     def log_data_change(
         self,
         change_type: str,
@@ -211,7 +198,7 @@ class AuditLogger:
     ) -> None:
         """
         Log data changes for compliance.
-        
+
         Args:
             change_type: Type of change (create, update, delete)
             resource_id: ID of the resource
@@ -231,7 +218,7 @@ class AuditLogger:
             user_id=user_id,
             agent_id=agent_id,
         )
-    
+
     def get_audit_logs(
         self,
         start_date: Optional[datetime] = None,
@@ -243,7 +230,7 @@ class AuditLogger:
     ) -> list:
         """
         Retrieve audit logs with filtering.
-        
+
         Args:
             start_date: Start date for filtering
             end_date: End date for filtering
@@ -251,21 +238,21 @@ class AuditLogger:
             agent_id: Filter by agent ID
             event_type: Filter by event type
             limit: Maximum number of logs to return
-            
+
         Returns:
             List of audit log entries
         """
         # This is a simplified implementation
         # In a real system, you would query a proper audit database
         logs = []
-        
+
         try:
             if os.path.exists(self.log_file):
                 with open(self.log_file, 'r') as f:
                     for line in f:
                         try:
                             log_entry = json.loads(line.strip())
-                            
+
                             # Apply filters
                             if start_date and log_entry['timestamp'] < start_date.isoformat():
                                 continue
@@ -277,16 +264,16 @@ class AuditLogger:
                                 continue
                             if event_type and log_entry.get('event_type') != event_type:
                                 continue
-                            
+
                             logs.append(log_entry)
-                            
+
                             if len(logs) >= limit:
                                 break
-                                
+
                         except json.JSONDecodeError:
                             continue
-            
+
         except Exception as e:
             logger.error(f"Failed to retrieve audit logs: {e}", exc_info=True)
-        
+
         return logs
