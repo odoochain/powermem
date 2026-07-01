@@ -338,5 +338,95 @@ PowerMem
 | pgvector RRF 融合 | ✅ 已实现 | `_rrf_fusion()` |
 | pgvector 加权融合 | ✅ 已实现 | `_weighted_fusion()` |
 | pgvector 并发搜索 | ✅ 已实现 | `search()` ThreadPoolExecutor |
-| APEGraphStore | ⏳ 待实现 | — |
+| AGEGraphStore | ✅ 已实现 | `src/powermem/storage/age/age_graph.py` |
+| AGEGraphConfig | ✅ 已实现 | `src/powermem/storage/config/age.py` |
+| 工厂注册 | ✅ 已实现 | `src/powermem/storage/factory.py` |
 | SAG MCP 集成 | ⏳ 待实现 | — |
+
+## 7. odoo-ai 项目精华吸收分析
+
+**项目位置**：`D:\odoochain\odoo-ai`
+
+### 7.1 odoo-ai 是什么
+
+odoo-ai 是一个面向 Odoo 开发的 AI 技能框架，核心能力包括：
+- **Spec-Driven Development (SDD)** — 13 阶段规范驱动开发流程
+- **engram-drive** — 基于 Google Drive 的团队记忆同步
+- **skill-evolver** — 自动检测开发模式并生成新技能
+- **Hooks 层** — 15 个 Claude Code 钩子，覆盖会话全生命周期
+
+### 7.2 可吸收的精华
+
+| 能力 | odoo-ai 实现 | PowerMem 可吸收方式 |
+|------|-------------|-------------------|
+| **SDD 工作流** | explore→propose→spec→design→tasks→apply→verify→archive | 作为 PowerMem 的 Skill 层，将开发流程规范化 |
+| **团队记忆同步** | engram-drive：每人写自己的 Google Drive 子目录，只读导入他人 | PowerMem 的 multi-agent 隔离 + 共享机制可参考此模式 |
+| **skill-evolver** | 自动检测重复模式 → 分类 → 生成最小 diff → 确认应用 | PowerMem 的 SkillStore 可吸收此模式实现自我进化 |
+| **Hooks 全生命周期** | SessionStart(5) → UserPromptSubmit(2) → PreToolUse(3) → PostToolUse(3) → PostCompact(3) → Stop(1) | PowerMem 的 Claude Code 插件可参考此钩子覆盖度 |
+| **Phase→Adapter Routing** | 不同 SDD 阶段路由到不同 AI 模型 | PowerMem 的 LLM 配置可支持按任务类型选择模型 |
+| **CodeGraph 集成** | AST 搜索替代 grep，减少 57% tokens | PowerMem 已有 CodeGraph 支持，可深化集成 |
+| **6 层架构验证** | 数据层→安全→视图→控制器→前端→测试，逐层强制 | PowerMem 的记忆分类可参考此分层模型 |
+
+### 7.3 具体吸收建议
+
+#### 优先级 1：skill-evolver 模式吸收
+
+odoo-ai 的 `skill-evolver` 是一个自我进化机制：检测重复模式 → 检查是否已存在 → 分类到合适的技能 → 生成最小变更 → 用户确认 → 应用并记录。
+
+PowerMem 的 `SkillStore` 已经有技能存储能力，可以吸收此模式：
+
+```python
+# 概念性伪代码
+class SkillEvolver:
+    def detect_pattern(self, session_history: List[Dict]) -> Optional[Pattern]:
+        """从会话历史中检测重复模式"""
+        
+    def check_duplicate(self, pattern: Pattern) -> bool:
+        """检查是否已有类似技能"""
+        
+    def classify_domain(self, pattern: Pattern) -> str:
+        """分类到合适的技能域"""
+        
+    def generate_diff(self, pattern: Pattern, target_skill: str) -> Diff:
+        """生成最小变更"""
+        
+    def apply_with_confirmation(self, diff: Diff) -> bool:
+        """用户确认后应用"""
+```
+
+#### 优先级 2：团队记忆同步模式
+
+engram-drive 的核心设计：每人只写自己的目录，只读导入他人。零冲突、零服务器。
+
+PowerMem 的 multi-agent 隔离已经有 `user_id`/`agent_id`/`run_id` 过滤，可以在此基础上实现类似的团队同步：
+
+```
+PowerMem team sync:
+├── Alice/  ← Alice 的记忆（只有她写）
+├── Bob/    ← Bob 的记忆（只有他写）
+└── Carol/  ← Carol 的记忆（只有她写）
+```
+
+#### 优先级 3：SDD 工作流作为 PowerMem Skill
+
+odoo-ai 的 13 阶段 SDD 流程可以封装为 PowerMem 的技能层，让记忆驱动的开发流程规范化：
+
+```
+/sdd-explore  → PowerMem 搜索相关记忆
+/sdd-propose  → 基于记忆生成提案
+/sdd-spec     → 规范化需求
+/sdd-design   → 架构设计
+/sdd-tasks    → 任务分解
+/sdd-apply    → 实现（带记忆上下文）
+/sdd-verify   → 验证（带历史模式）
+/sdd-archive  → 归档到 PowerMem 记忆
+```
+
+### 7.4 不适合吸收的部分
+
+| 能力 | 原因 |
+|------|------|
+| Odoo 专属知识库 | PowerMem 是通用记忆引擎，不需要领域特定知识 |
+| Google Drive 同步 | PowerMem 有自己的存储后端（OceanBase/pgvector/SQLite） |
+| PowerShell 钩子脚本 | PowerMem 用 Python，钩子实现方式不同 |
+| Iris MCP 编排器 | PowerMem 自己就是 MCP server，不需要外部编排器 |
