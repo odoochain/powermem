@@ -122,6 +122,34 @@ class PGVectorConfig(BaseVectorStoreConfig):
         description="psycopg connection pool object"
     )
 
+    hybrid_search: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "hybrid_search",
+            "POSTGRES_HYBRID_SEARCH",
+        ),
+        description="Enable hybrid search (vector + fulltext with RRF fusion)"
+    )
+
+    fulltext_language: str = Field(
+        default="english",
+        validation_alias=AliasChoices(
+            "fulltext_language",
+            "POSTGRES_FTS_LANGUAGE",
+        ),
+        description="PostgreSQL text search language for FTS (e.g. english, chinese)"
+    )
+
+    vector_weight: float = Field(
+        default=0.5,
+        description="Weight for vector search in hybrid fusion (0.0-1.0)"
+    )
+
+    fts_weight: float = Field(
+        default=0.5,
+        description="Weight for fulltext search in hybrid fusion (0.0-1.0)"
+    )
+
     @model_validator(mode="before")
     @classmethod
     def check_auth_and_connection(cls, values):

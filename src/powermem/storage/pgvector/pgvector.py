@@ -1,7 +1,11 @@
 import json
 import logging
+import math
+import re
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
-from typing import Any, List, Optional, Dict
+from typing import Any, Dict, List, Optional, Tuple
 
 from powermem.storage.base import VectorStoreBase, OutputData
 from powermem.utils.utils import generate_snowflake_id
@@ -45,6 +49,10 @@ class PGVectorStore(VectorStoreBase):
         sslmode=None,
         connection_string=None,
         connection_pool=None,
+        hybrid_search: bool = True,
+        fulltext_language: str = "english",
+        vector_weight: float = 0.5,
+        fts_weight: float = 0.5,
     ):
         """
         Initialize the PGVector database.
@@ -70,6 +78,11 @@ class PGVectorStore(VectorStoreBase):
         self.use_hnsw = hnsw
         self.embedding_model_dims = embedding_model_dims
         self.connection_pool = None
+        self.hybrid_search = hybrid_search
+        self.fulltext_language = fulltext_language
+        self.vector_weight = vector_weight
+        self.fts_weight = fts_weight
+        self._lock = threading.Lock()
 
         # Connection setup with priority: connection_pool > connection_string > individual parameters
         if connection_pool is not None:
@@ -149,6 +162,7 @@ class PGVectorStore(VectorStoreBase):
                     id BIGINT PRIMARY KEY,
                     vector vector({self.embedding_model_dims}),
                     payload JSONB,
+                    fulltext_content TEXT DEFAULT '',
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
                 """
@@ -166,6 +180,29 @@ class PGVectorStore(VectorStoreBase):
                 END $$;
                 """
             )
+
+            # Add fulltext_content column if it doesn't exist (for existing tables)
+            cur.execute(
+                f"""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
+                                   WHERE table_name='{self.collection_name}' AND column_name='fulltext_content') THEN
+                        ALTER TABLE {self.collection_name} ADD COLUMN fulltext_content TEXT DEFAULT '';
+                    END IF;
+                END $$;
+                """
+            )
+
+            # Create GIN index for fulltext search if hybrid search is enabled
+            if self.hybrid_search:
+                cur.execute(
+                    f"""
+                    CREATE INDEX IF NOT EXISTS {self.collection_name}_fts_idx
+                    ON {self.collection_name}
+                    USING GIN (to_tsvector('{self.fulltext_language}', fulltext_content));
+                    """
+                )
 
             if self.use_diskann and self.embedding_model_dims < 2000:
                 cur.execute("SELECT * FROM pg_extension WHERE extname = 'vectorscale'")
@@ -190,31 +227,35 @@ class PGVectorStore(VectorStoreBase):
     def insert(self, vectors: list[list[float]], payloads=None, ids=None) -> list[int]:
         """
         Insert vectors into the collection.
-        
+
         Args:
             vectors: List of vectors to insert
             payloads: List of payload dictionaries
             ids: Deprecated parameter (ignored), IDs are now generated using Snowflake algorithm
-            
+
         Returns:
             List[int]: List of generated Snowflake IDs
         """
         logger.info(f"Inserting {len(vectors)} vectors into collection {self.collection_name}")
         if not vectors:
             return []
-        
+
         # Generate Snowflake IDs for each vector
         generated_ids = [generate_snowflake_id() for _ in range(len(vectors))]
-        
+
         json_payloads = [json.dumps(payload) for payload in payloads]
-        # Include the generated Snowflake ID in the data
-        data = [(vector_id, vector, payload) for vector_id, vector, payload in zip(generated_ids, vectors, json_payloads)]
+        # Extract fulltext content from payloads for FTS indexing
+        fulltext_contents = [self._extract_fulltext_content(payload) for payload in payloads]
+        # Include the generated Snowflake ID and fulltext content in the data
+        data = [(vector_id, vector, payload, ft_content)
+                for vector_id, vector, payload, ft_content
+                in zip(generated_ids, vectors, json_payloads, fulltext_contents)]
         
         if PSYCOPG_VERSION == 3:
             with self._get_cursor(commit=True) as cur:
-                # Insert with explicit IDs
+                # Insert with explicit IDs and fulltext content
                 cur.executemany(
-                    f"INSERT INTO {self.collection_name} (id, vector, payload) VALUES (%s, %s, %s)",
+                    f"INSERT INTO {self.collection_name} (id, vector, payload, fulltext_content) VALUES (%s, %s, %s, %s)",
                     data,
                 )
         else:
@@ -222,7 +263,7 @@ class PGVectorStore(VectorStoreBase):
                 # psycopg2: use execute_values
                 execute_values(
                     cur,
-                    f"INSERT INTO {self.collection_name} (id, vector, payload) VALUES %s",
+                    f"INSERT INTO {self.collection_name} (id, vector, payload, fulltext_content) VALUES %s",
                     data,
                 )
         
@@ -235,19 +276,116 @@ class PGVectorStore(VectorStoreBase):
         vectors: list[float],
         limit: Optional[int] = 5,
         filters: Optional[dict] = None,
+        retrieval_mode: str = "auto",
+        fusion: str = "rrf",
+        vector_weight: Optional[float] = None,
+        fts_weight: Optional[float] = None,
+        rrf_k: int = 60,
+        candidate_limit: Optional[int] = None,
+        threshold: Optional[float] = None,
+        include_explanation: bool = False,
     ) -> List[OutputData]:
         """
-        Search for similar vectors.
+        Search for similar vectors with optional hybrid search.
 
         Args:
-            query (str): Query.
-            vectors (List[float]): Query vector.
+            query (str): Text query for fulltext search.
+            vectors (List[float]): Query vector for vector search.
             limit (int, optional): Number of results to return. Defaults to 5.
-            filters (Dict, optional): Filters to apply to the search. Defaults to None.
+            filters (Dict, optional): Filters to apply to the search.
+            retrieval_mode (str): "auto", "fts", "vector", or "hybrid".
+            fusion (str): "rrf" or "weighted".
+            vector_weight (float, optional): Weight for vector search in fusion.
+            fts_weight (float, optional): Weight for FTS search in fusion.
+            rrf_k (int): RRF constant (default 60).
+            candidate_limit (int, optional): Candidate limit before final truncation.
+            threshold (float, optional): Minimum score threshold.
+            include_explanation (bool): Whether to include explanation in results.
 
         Returns:
             list: Search results.
         """
+        mode = (retrieval_mode or "auto").lower()
+        fusion_method = (fusion or "rrf").lower()
+        search_limit = candidate_limit if candidate_limit is not None else limit
+
+        has_vectors = vectors is not None and (
+            (isinstance(vectors, list) and len(vectors) > 0 and isinstance(vectors[0], (int, float)))
+            or (isinstance(vectors, list) and len(vectors) > 0 and isinstance(vectors[0], list))
+        )
+        has_query = isinstance(query, str) and query.strip() != ""
+
+        # Normalize query vector
+        query_vector = None
+        if has_vectors:
+            if isinstance(vectors[0], (int, float)):
+                query_vector = vectors
+            else:
+                query_vector = vectors[0]
+
+        # Pure FTS mode
+        if mode == "fts":
+            return self._fulltext_search(query, search_limit, filters)[:limit]
+
+        # Pure vector mode or no hybrid search capability
+        if mode == "vector" or not self.hybrid_search or not has_query:
+            return self._vector_search(query_vector, search_limit, filters)[:limit]
+
+        # Hybrid mode: both vector and FTS
+        if has_vectors and has_query:
+            # Run searches concurrently
+            vector_results = []
+            fts_results = []
+
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                future_vector = executor.submit(
+                    self._vector_search, query_vector, search_limit, filters
+                )
+                future_fts = executor.submit(
+                    self._fulltext_search, query, search_limit, filters
+                )
+                for future in as_completed([future_vector, future_fts]):
+                    try:
+                        result = future.result()
+                        if future is future_vector:
+                            vector_results = result
+                        else:
+                            fts_results = result
+                    except Exception as e:
+                        logger.warning(f"Search failed: {e}")
+
+            # Fuse results
+            if fusion_method == "weighted":
+                final = self._weighted_fusion(
+                    vector_results, fts_results, limit,
+                    vector_weight=vector_weight, fts_weight=fts_weight,
+                )
+            else:
+                final = self._rrf_fusion(
+                    vector_results, fts_results, limit, k=rrf_k,
+                    vector_weight=vector_weight, fts_weight=fts_weight,
+                )
+
+            # Apply threshold
+            if threshold is not None:
+                final = [r for r in final if r.payload.get("_quality_score", r.score) >= threshold]
+
+            return final
+
+        # Fallback: only vectors available
+        if has_vectors:
+            return self._vector_search(query_vector, search_limit, filters)[:limit]
+
+        # Fallback: only query available
+        return self._fulltext_search(query, search_limit, filters)[:limit]
+
+    def _vector_search(
+        self, query_vector: List[float], limit: int = 5, filters: Optional[dict] = None
+    ) -> List[OutputData]:
+        """Pure vector cosine similarity search."""
+        if query_vector is None:
+            return []
+
         filter_conditions = []
         filter_params = []
 
@@ -272,11 +410,92 @@ class PGVectorStore(VectorStoreBase):
                 ORDER BY distance
                 LIMIT %s
                 """,
-                (vectors, *filter_params, limit),
+                (query_vector, *filter_params, limit),
             )
 
             results = cur.fetchall()
-        return [OutputData(id=r[0], score=max(1.0 - float(r[1]) / 2.0, 0.0), payload=r[2]) for r in results]
+
+        output = []
+        for r in results:
+            distance = float(r[1])
+            similarity = max(1.0 - distance / 2.0, 0.0)
+            payload = r[2] if isinstance(r[2], dict) else json.loads(r[2])
+            payload['_vector_similarity'] = similarity
+            output.append(OutputData(id=r[0], score=similarity, payload=payload))
+        return output
+
+    @staticmethod
+    def _weighted_fusion(
+        vector_results: List[OutputData],
+        fts_results: List[OutputData],
+        limit: int,
+        vector_weight: Optional[float] = None,
+        fts_weight: Optional[float] = None,
+    ) -> List[OutputData]:
+        """Weighted fusion using per-path min-max normalized scores."""
+        vw = vector_weight if vector_weight is not None else 0.5
+        fw = fts_weight if fts_weight is not None else 0.5
+
+        def normalized_scores(results: List[OutputData]) -> Dict[int, float]:
+            if not results:
+                return {}
+            scores = [float(r.score or 0.0) for r in results]
+            min_s, max_s = min(scores), max(scores)
+            if max_s == min_s:
+                return {r.id: 1.0 for r in results}
+            return {r.id: (float(r.score or 0.0) - min_s) / (max_s - min_s) for r in results}
+
+        vec_scores = normalized_scores(vector_results)
+        fts_scores = normalized_scores(fts_results)
+        all_docs: Dict[int, dict] = {}
+
+        for rank, result in enumerate(vector_results, 1):
+            all_docs[result.id] = {
+                "result": result,
+                "vector_rank": rank,
+                "fts_rank": None,
+                "weighted_score": vw * vec_scores.get(result.id, 0.0),
+            }
+
+        for rank, result in enumerate(fts_results, 1):
+            ws = fw * fts_scores.get(result.id, 0.0)
+            if result.id in all_docs:
+                all_docs[result.id]["fts_rank"] = rank
+                all_docs[result.id]["weighted_score"] += ws
+                all_docs[result.id]["result"].payload["_fts_score"] = result.payload.get("_fts_score")
+            else:
+                all_docs[result.id] = {
+                    "result": result,
+                    "vector_rank": None,
+                    "fts_rank": rank,
+                    "weighted_score": ws,
+                }
+
+        sorted_docs = sorted(all_docs.values(), key=lambda d: d["weighted_score"], reverse=True)
+
+        final_results = []
+        for doc_data in sorted_docs[:limit]:
+            result = doc_data["result"]
+            score = doc_data["weighted_score"]
+            quality_score = (
+                1.0
+                if doc_data["fts_rank"] is not None
+                else result.payload.get("_vector_similarity", score)
+            )
+            result.score = score
+            result.payload["_fusion_score"] = score
+            result.payload["_quality_score"] = quality_score
+            result.payload["_fusion_info"] = {
+                "vector_rank": doc_data["vector_rank"],
+                "fts_rank": doc_data["fts_rank"],
+                "weighted_score": score,
+                "fusion_method": "weighted",
+                "vector_weight": vw,
+                "fts_weight": fw,
+            }
+            final_results.append(result)
+
+        return final_results
 
     def delete(self, vector_id: int) -> None:
         """
@@ -309,18 +528,19 @@ class PGVectorStore(VectorStoreBase):
                     (vector, vector_id),
                 )
             if payload:
+                ft_content = self._extract_fulltext_content(payload)
                 # Handle JSON serialization based on psycopg version
                 if PSYCOPG_VERSION == 3:
                     # psycopg3 uses psycopg.types.json.Json
                     cur.execute(
-                        f"UPDATE {self.collection_name} SET payload = %s WHERE id = %s",
-                        (Json(payload), vector_id),
+                        f"UPDATE {self.collection_name} SET payload = %s, fulltext_content = %s WHERE id = %s",
+                        (Json(payload), ft_content, vector_id),
                     )
                 else:
                     # psycopg2 uses psycopg2.extras.Json
                     cur.execute(
-                        f"UPDATE {self.collection_name} SET payload = %s WHERE id = %s",
-                        (Json(payload), vector_id),
+                        f"UPDATE {self.collection_name} SET payload = %s, fulltext_content = %s WHERE id = %s",
+                        (Json(payload), ft_content, vector_id),
                     )
 
 
@@ -343,6 +563,182 @@ class PGVectorStore(VectorStoreBase):
             if not result:
                 return None
             return OutputData(id=result[0], score=None, payload=result[2])
+
+    @staticmethod
+    def _extract_fulltext_content(payload: dict) -> str:
+        """Extract text content from payload for FTS indexing."""
+        if not payload:
+            return ""
+        for key in ("fulltext_content", "data", "content"):
+            val = payload.get(key)
+            if val and isinstance(val, str):
+                return val
+        return ""
+
+    @staticmethod
+    def _sanitize_fts_query(query: str) -> str:
+        """Build a safe FTS query string from user input.
+
+        Extracts word tokens and wraps each in single quotes for PostgreSQL FTS.
+        """
+        if not query or not query.strip():
+            return ""
+        tokens = re.findall(r"[\w]+", query, re.UNICODE)
+        if not tokens:
+            return ""
+        return " & ".join(f"'{t}'" for t in tokens)
+
+    def _fulltext_search(
+        self, query: str, limit: int = 5, filters: Optional[dict] = None
+    ) -> List[OutputData]:
+        """Perform PostgreSQL fulltext search using tsvector/tsquery."""
+        if not query or not query.strip():
+            return []
+
+        fts_query = self._sanitize_fts_query(query)
+        if not fts_query:
+            return []
+
+        filter_conditions = []
+        filter_params = []
+
+        if filters:
+            for k, v in filters.items():
+                if "." in k:
+                    filter_conditions.append(
+                        "payload #>> string_to_array(%s, '.') = %s"
+                    )
+                else:
+                    filter_conditions.append("payload->>%s = %s")
+                filter_params.extend([k, str(v)])
+
+        filter_clause = "WHERE " + " AND ".join(filter_conditions) if filter_conditions else ""
+
+        # Build the fulltext search query with ts_rank for scoring
+        sql = f"""
+            SELECT id, payload,
+                   ts_rank(to_tsvector('{self.fulltext_language}', fulltext_content),
+                           to_tsquery('{self.fulltext_language}', %s)) AS rank
+            FROM {self.collection_name}
+            {filter_clause}
+            AND to_tsvector('{self.fulltext_language}', fulltext_content) @@
+                  to_tsquery('{self.fulltext_language}', %s)
+            ORDER BY rank DESC
+            LIMIT %s
+        """
+
+        # If there are filters, adjust the WHERE clause
+        if filter_conditions:
+            sql = f"""
+                SELECT id, payload,
+                       ts_rank(to_tsvector('{self.fulltext_language}', fulltext_content),
+                               to_tsquery('{self.fulltext_language}', %s)) AS rank
+                FROM {self.collection_name}
+                WHERE {' AND '.join(filter_conditions)}
+                  AND to_tsvector('{self.fulltext_language}', fulltext_content) @@
+                        to_tsquery('{self.fulltext_language}', %s)
+                ORDER BY rank DESC
+                LIMIT %s
+            """
+            params = (*filter_params, fts_query, fts_query, limit)
+        else:
+            sql = f"""
+                SELECT id, payload,
+                       ts_rank(to_tsvector('{self.fulltext_language}', fulltext_content),
+                               to_tsquery('{self.fulltext_language}', %s)) AS rank
+                FROM {self.collection_name}
+                WHERE to_tsvector('{self.fulltext_language}', fulltext_content) @@
+                      to_tsquery('{self.fulltext_language}', %s)
+                ORDER BY rank DESC
+                LIMIT %s
+            """
+            params = (fts_query, fts_query, limit)
+
+        results = []
+        with self._get_cursor() as cur:
+            try:
+                cur.execute(sql, params)
+                for row in cur.fetchall():
+                    doc_id, payload_str, rank_score = row
+                    payload = json.loads(payload_str) if isinstance(payload_str, str) else payload_str
+                    payload['_fts_score'] = float(rank_score)
+                    results.append(OutputData(
+                        id=doc_id,
+                        score=float(rank_score),
+                        payload=payload,
+                    ))
+            except Exception as exc:
+                logger.warning(f"Fulltext search failed: {exc}")
+
+        return results
+
+    def _rrf_fusion(
+        self,
+        vector_results: List[OutputData],
+        fts_results: List[OutputData],
+        limit: int,
+        k: int = 60,
+        vector_weight: Optional[float] = None,
+        fts_weight: Optional[float] = None,
+    ) -> List[OutputData]:
+        """Reciprocal Rank Fusion combining vector and FTS results."""
+        vw = vector_weight if vector_weight is not None else self.vector_weight
+        fw = fts_weight if fts_weight is not None else self.fts_weight
+
+        all_docs: Dict[int, dict] = {}
+
+        for rank, result in enumerate(vector_results, 1):
+            rrf_score = vw * (1.0 / (k + rank))
+            all_docs[result.id] = {
+                'result': result,
+                'vector_rank': rank,
+                'fts_rank': None,
+                'rrf_score': rrf_score,
+            }
+
+        for rank, result in enumerate(fts_results, 1):
+            fts_rrf = fw * (1.0 / (k + rank))
+            if result.id in all_docs:
+                all_docs[result.id]['fts_rank'] = rank
+                all_docs[result.id]['rrf_score'] += fts_rrf
+                all_docs[result.id]['result'].payload['_fts_score'] = (
+                    result.payload.get('_fts_score')
+                )
+            else:
+                all_docs[result.id] = {
+                    'result': result,
+                    'vector_rank': None,
+                    'fts_rank': rank,
+                    'rrf_score': fts_rrf,
+                }
+
+        sorted_docs = sorted(
+            all_docs.values(), key=lambda d: d['rrf_score'], reverse=True
+        )
+
+        final_results = []
+        for doc_data in sorted_docs[:limit]:
+            result = doc_data['result']
+            score = doc_data['rrf_score']
+            quality_score = (
+                1.0
+                if doc_data['fts_rank'] is not None
+                else result.payload.get('_vector_similarity', score)
+            )
+            result.score = score
+            result.payload['_fusion_score'] = score
+            result.payload['_quality_score'] = quality_score
+            result.payload['_fusion_info'] = {
+                'vector_rank': doc_data['vector_rank'],
+                'fts_rank': doc_data['fts_rank'],
+                'rrf_score': score,
+                'fusion_method': 'rrf',
+                'vector_weight': vw,
+                'fts_weight': fw,
+            }
+            final_results.append(result)
+
+        return final_results
 
     def list_cols(self) -> List[str]:
         """
