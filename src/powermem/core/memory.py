@@ -31,6 +31,7 @@ from .audit import AuditLogger
 from ..intelligence.memory_optimizer import MemoryOptimizer
 from ..intelligence.plugin import IntelligentMemoryPlugin, EbbinghausIntelligencePlugin
 from ..intelligence.skill_manager import SkillManager
+from ..intelligence.skill_evolver import SkillEvolver
 from ..utils.utils import (
     convert_config_object_to_dict,
     parse_vision_messages,
@@ -794,6 +795,11 @@ class Memory(MemoryBase):
         self._init_source_store()
 
         self.skill_manager = SkillManager(self.llm)
+        self.skill_evolver = SkillEvolver(
+            self.llm,
+            skill_store=self.skill_store,
+            embedder=self.embedding_model if hasattr(self, "embedding_model") else None,
+        )
         self.content_reviewer = None  # content review disabled without reviewer
 
         logger.info(f"Memory initialized with storage: {self.storage_type}, LLM: {self.llm_provider}, agent: {self.agent_id or 'default'}")
@@ -3103,6 +3109,32 @@ class Memory(MemoryBase):
             or ``{"action": "skip"}``.
         """
         return self.skill_manager.merge(existing, new)
+
+    def evolve_skills(
+        self,
+        session_history: List[Dict[str, str]],
+        user_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Detect recurring patterns across sessions and propose skill updates.
+
+        This is a read-only analysis — it returns proposals but does NOT modify
+        the skill store. The caller must review and apply proposals individually
+        via :meth:`add_skill` or :meth:`update_skill`.
+
+        Args:
+            session_history: List of message dicts with "role" and "content".
+            user_id: Optional user filter for searching existing skills.
+            agent_id: Optional agent filter for searching existing skills.
+
+        Returns:
+            List of proposals. Each proposal has ``action`` = "create" or "update".
+            - ``create``: ``{"action": "create", "title": ..., "description": ..., "tags": ..., "procedure": ...}``
+            - ``update``: ``{"action": "update", "skill_id": int, "reason": ..., "new_steps": ..., "new_pitfalls": ...}``
+        """
+        return self.skill_evolver.evolve(
+            session_history, user_id=user_id, agent_id=agent_id
+        )
 
     def add_skill(
         self, title: str, description: str,

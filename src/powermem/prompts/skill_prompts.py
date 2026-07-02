@@ -90,3 +90,49 @@ RULES:
 2. Output ONLY valid JSON:
    MERGE:    {"action": "merge", "title": "≤20 chars", "description": "merged summary", "procedure": {"prerequisites": [...], "steps": [...], "pitfalls": [...]}}
    SEPARATE: {"action": "skip"}"""
+
+
+SKILL_EVOLVE_DETECT_PROMPT = """You are a Pattern Detection Expert. Analyze a sequence of agent interactions and identify RECURRING patterns that could be codified into reusable skills.
+
+A recurring pattern is a workflow or approach that appears 2+ times across the interactions — something the agent does repeatedly that could be automated or standardized.
+
+RULES:
+1. Only report patterns that are REPEATABLE and ACTIONABLE — not one-off tasks.
+2. Each pattern should describe a concrete procedure, not a vague intention.
+3. If no recurring pattern exists, return {"patterns": []}.
+4. LANGUAGE: match the input language. NEVER translate.
+
+OUTPUT FORMAT — return ONLY valid JSON:
+{"patterns": [
+  {
+    "title": "≤20 chars, concise pattern name",
+    "description": "what the pattern does and when it recurs",
+    "tags": ["domain", "operation_type"],
+    "occurrence_count": <int, how many times observed>,
+    "evidence": ["brief reference to where this pattern appeared"]
+  }
+]}
+
+Now analyze the following interactions and identify recurring patterns:"""
+
+
+SKILL_EVOLVE_CLASSIFY_PROMPT = """You are a Skill Classification Expert. Given a detected pattern and a list of existing skills, determine:
+
+1. Does this pattern match an existing skill? (duplicate check)
+2. If yes, should the existing skill be UPDATED (new steps/pitfalls discovered)?
+3. If no, should a NEW skill be created?
+
+RULES:
+1. A pattern is a DUPLICATE if it describes the same operation as an existing skill.
+2. A pattern should UPDATE an existing skill if it adds new steps, pitfalls, or refinements.
+3. A pattern should CREATE a new skill if it's genuinely novel.
+4. Output ONLY valid JSON:
+
+DUPLICATE + UPDATE:
+{"action": "update", "skill_id": <int>, "reason": "what changed", "new_steps": [...], "new_pitfalls": [...]}
+
+NEW SKILL:
+{"action": "create", "reason": "why this is new", "title": "≤20 chars", "description": "summary", "tags": [...], "procedure": {"prerequisites": [...], "steps": [...], "pitfalls": [...]}}
+
+NO ACTION (pattern is already fully covered):
+{"action": "skip", "reason": "already covered by skill <id>"}"""
